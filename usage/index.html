@@ -344,6 +344,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dynamic-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#events-and-metrics" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -471,6 +482,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dynamic-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#events-and-metrics" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -551,14 +573,25 @@
 <span class="x">$agent-&gt;start();      // marks running, loads crash-recovery state (may throw)</span>
 <span class="x">$agent-&gt;sendEvent($event);   // ingest: never throws</span>
 <span class="x">$agent-&gt;sendMetric($metric); // ingest: never throws</span>
-<span class="x">$agent-&gt;tick();       // host-driven loop body: flush triggers + status push</span>
+<span class="x">$agent-&gt;tick();       // host-driven loop body: flush triggers + status push + rules refresh</span>
 <span class="x">$agent-&gt;flushBuffer();// force a flush cycle (never throws)</span>
 <span class="x">$agent-&gt;getStatus();  // AgentStatus snapshot</span>
 <span class="x">$agent-&gt;healthCheck();// true when the ingestion API is reachable and healthy</span>
-<span class="x">$agent-&gt;getStats();   // buffer occupancy, drops, retries</span>
+<span class="x">$agent-&gt;getDynamicRules(); // SaaS dynamic rules (TTL-cached, null on outage)</span>
+<span class="x">$agent-&gt;getStats();   // buffer occupancy, drops, retries, rules counters</span>
 <span class="x">$agent-&gt;stop();       // final flush, stop loops, release Redis (never throws)</span>
 </code></pre></div>
-<p>PHP has no background threads, so the flush and status loops of the
+<h2 id="dynamic-rules">Dynamic rules</h2>
+<p><code>getDynamicRules()</code> fetches <code>GET /api/v1/rules</code> (retry, circuit breaker, and
+<code>Retry-After</code> semantics shared with the batch sends) and returns a
+<code>DynamicRules</code> value object mirroring the Python agent's pydantic model
+(snake_case wire keys). The copy is cached in memory and served while it is
+younger than its own <code>ttl</code>; a failed fetch returns <code>null</code> and keeps the last
+good rules cached, and <code>tick()</code> refreshes the cache every
+<code>dynamicRuleInterval</code> seconds (default 300, minimum 60). Counters live in
+<code>getStats()</code>: <code>rulesFetched</code>, <code>cachedRules</code>, <code>rulesLastUpdate</code>, and
+<code>loopFailures.rules</code>.</p>
+<p>PHP has no background threads, so the flush, status, and rules loops of the
 Python/TypeScript/Go agents are host-driven. Long-running workers call
 <code>tick()</code> from their own loop; request-scoped apps call <code>flushBuffer()</code> from
 <code>kernel.terminate</code> or <code>register_shutdown_function</code>. Only <code>start()</code> may
