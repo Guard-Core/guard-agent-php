@@ -39,6 +39,8 @@ $kind = match ($path) {
     '/api/v1/events' => 'events',
     '/api/v1/metrics' => 'metrics',
     '/api/v1/status' => 'status',
+    // Encrypted batches share the events script kind.
+    '/api/v1/events/encrypted' => 'events',
     default => null,
 };
 
@@ -61,7 +63,7 @@ if (($control['signatureSecret'] ?? null) !== null) {
     $expected = hash_hmac('sha256', $uncompressed, (string) $control['signatureSecret']);
     $signatureValid = str_starts_with($signature, 'v1=') && hash_equals($expected, substr($signature, 3));
     if (!$signatureValid && ($control['requireSigned'] ?? false) === true) {
-        log_request('signature_rejected');
+        log_request('signature_rejected', $uncompressed);
         respond(401, ['detail' => 'Invalid payload signature']);
         return;
     }
@@ -79,19 +81,19 @@ if ($entry !== null) {
     if (is_array($entry) && isset($entry['retryAfter'])) {
         header('Retry-After: ' . (string) (int) $entry['retryAfter']);
     }
-    log_request($status);
+    log_request($status, $uncompressed);
     respond($status, $responseBody);
     return;
 }
 
 // Unscripted: payload size guard, then the happy-path echo envelope.
 if (strlen($uncompressed) > 262144) {
-    log_request(413);
+    log_request(413, $uncompressed);
     respond(413, ['detail' => 'Payload exceeds 262144 bytes']);
     return;
 }
 
-log_request(200);
+log_request(200, $uncompressed);
 respond(200, [
     'success' => true,
     'echo' => [
@@ -111,7 +113,7 @@ function respond(int $status, mixed $body): void
     echo json_encode($body, JSON_UNESCAPED_SLASHES);
 }
 
-function log_request(int|string $status): void
+function log_request(int|string $status, string $requestBody = ''): void
 {
     $stateFile = getenv('MOCK_STATE_FILE') ?: '';
     if ($stateFile === '') {
@@ -127,8 +129,13 @@ function log_request(int|string $status): void
         'x_project_id' => $_SERVER['HTTP_X_PROJECT_ID'] ?? null,
         'x_agent_install_id' => $_SERVER['HTTP_X_AGENT_INSTALL_ID'] ?? null,
         'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+        'body_json' => json_decode($requestBody, true),
     ];
-    @file_put_contents($stateFile, json_encode($record) . "\n", FILE_APPEND | LOCK_EX);
+    @file_put_contents(
+        $stateFile,
+        json_encode($record) . "\n",
+        FILE_APPEND | LOCK_EX
+    );
 }
 
 function persist_control(string $controlFile, array $control): void

@@ -13,8 +13,8 @@ use RenzoFranceschini\GuardAgent\Log\AgentLogger;
  * listing every problem, mirroring GuardAgentHandler.__init__ raising
  * ValueError (guard_agent/client.py:72-74).
  *
- * Dropped relative to the Python agent (consistent with the TypeScript and Go
- * ports): project_encryption_key and the dynamic-rules loop.
+ * The dynamic-rules loop remains dropped; project_encryption_key is
+ * implemented (see Encryption\PayloadEncryptor).
  */
 final class AgentConfig
 {
@@ -49,6 +49,7 @@ final class AgentConfig
         public readonly ?string $installId = null,
         public readonly ?string $installIdPath = null,
         public readonly ?string $payloadSigningSecret = null,
+        public readonly ?string $projectEncryptionKey = null,
         public readonly ?\Closure $onError = null,
         public readonly ?AgentLogger $logger = null,
         public readonly ?RedisConfig $redis = null,

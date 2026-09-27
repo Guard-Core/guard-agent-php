@@ -88,6 +88,7 @@ final class AgentConfigResolver
             installId: self::optionalStringInput($input, 'installId', 'install_id'),
             installIdPath: self::optionalStringInput($input, 'installIdPath', 'install_id_path'),
             payloadSigningSecret: self::optionalStringInput($input, 'payloadSigningSecret', 'payload_signing_secret'),
+            projectEncryptionKey: self::optionalStringInput($input, 'projectEncryptionKey', 'project_encryption_key'),
             onError: ($input['onError'] ?? null) instanceof \Closure ? $input['onError'] : null,
             logger: $logger,
             redis: $redis,

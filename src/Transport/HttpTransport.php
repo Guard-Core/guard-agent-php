@@ -9,6 +9,9 @@ use RenzoFranceschini\GuardAgent\Exception\GuardAgentException;
 use RenzoFranceschini\GuardAgent\Exception\PayloadTooLargeException;
 use RenzoFranceschini\GuardAgent\Exception\PermanentClientException;
 use RenzoFranceschini\GuardAgent\Exception\RateLimitedException;
+use RenzoFranceschini\GuardAgent\Encryption\PayloadEncryptor;
+use RenzoFranceschini\GuardAgent\Exception\EncryptionConfigException;
+use RenzoFranceschini\GuardAgent\Exception\EncryptionException;
 use RenzoFranceschini\GuardAgent\Exception\SerializationException;
 use RenzoFranceschini\GuardAgent\Install\InstallId;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
@@ -87,6 +90,14 @@ final class HttpTransport implements TransportInterface
 
     private readonly string $installId;
 
+    private ?PayloadEncryptor $encryptor = null;
+
+    private bool $encryptionEnabled = false;
+
+    /** Endpoints whose POST bodies are encrypted when a key is configured
+     * (mirrors _transport_dispatch._ENCRYPTED_ENDPOINTS). */
+    private const ENCRYPTED_ENDPOINTS = ['/api/v1/events', '/api/v1/metrics'];
+
     private readonly AgentLogger $logger;
 
     public function __construct(
@@ -116,6 +127,7 @@ final class HttpTransport implements TransportInterface
             $headers[] = 'X-Project-Id: ' . $this->config->projectId;
         }
         $this->defaultHeaders = $headers;
+        $this->initEncryption();
         $this->initialized = true;
         $this->logger->info('HTTP transport initialized successfully');
     }
@@ -270,6 +282,10 @@ final class HttpTransport implements TransportInterface
         $data = $this->redactSensitiveHeaders($data);
         $url = rtrim($this->config->endpoint, '/') . $endpoint;
 
+        if ($this->isEncryptedTarget($endpoint, $data)) {
+            return $this->postEncrypted($data);
+        }
+
         try {
             $json = Json::encode($data);
         } catch (SerializationException $error) {
@@ -347,6 +363,107 @@ final class HttpTransport implements TransportInterface
         $this->logger->debug("Response: {$status} for POST {$url} ({$endpoint})");
 
         return [$status, $responseHeaders, (string) $responseBody];
+    }
+
+    /**
+     * Initialize the encryptor when projectEncryptionKey is set. Plaintext
+     * fallback is forbidden: an invalid key or a failed round trip raises
+     * EncryptionConfigException at startup (mirrors
+     * _transport_lifecycle._init_encryption).
+     */
+    private function initEncryption(): void
+    {
+        if ($this->config->projectEncryptionKey === null || $this->config->projectEncryptionKey === '') {
+            return;
+        }
+
+        try {
+            $this->encryptor = PayloadEncryptor::create($this->config->projectEncryptionKey);
+            if ($this->encryptor === null || !$this->encryptor->verifyKey()) {
+                throw new EncryptionConfigException('Encryption round-trip failed at startup; refusing plaintext fallback');
+            }
+            $this->encryptionEnabled = true;
+        } catch (EncryptionConfigException $error) {
+            $this->encryptor = null;
+            $this->encryptionEnabled = false;
+            throw $error;
+        } catch (\Throwable $error) {
+            $this->encryptor = null;
+            $this->encryptionEnabled = false;
+            throw new EncryptionConfigException('Encryption round-trip failed at startup; refusing plaintext fallback', previous: $error);
+        }
+    }
+
+    /**
+     * Whether this POST batch must be encrypted (mirrors
+     * _is_encrypted_target: payload present + encryption enabled + one of
+     * the telemetry endpoints).
+     *
+     * @param array<string, mixed> $data
+     */
+    private function isEncryptedTarget(string $endpoint, array $data): bool
+    {
+        return $data !== []
+            && $this->encryptionEnabled
+            && in_array($endpoint, self::ENCRYPTED_ENDPOINTS, true);
+    }
+
+    /**
+     * POST an encrypted batch to /api/v1/events/encrypted (mirrors
+     * _post_encrypted + _build_encrypted_payload): only the events/metrics
+     * arrays are encrypted; the envelope carries batch_id and version
+     * fields in clear. Envelope serialization failure fires the
+     * "encryption" hook and returns false so the batch is retained.
+     *
+     * @param array<string, mixed> $data
+     *
+     * @return array<string, mixed>|bool
+     */
+    private function postEncrypted(array $data): array|bool
+    {
+        $encryptor = $this->encryptor;
+        if ($encryptor === null) {
+            throw new EncryptionException('Encryptor not initialized');
+        }
+        $encryptedUrl = rtrim($this->config->endpoint, '/') . '/api/v1/events/encrypted';
+        $encryptedPayload = $encryptor->encrypt([
+            'events' => is_array($data['events'] ?? null) ? $data['events'] : [],
+            'metrics' => is_array($data['metrics'] ?? null) ? $data['metrics'] : [],
+        ]);
+        $envelope = [
+            'encrypted_payload' => $encryptedPayload,
+            'batch_id' => $data['batch_id'] ?? null,
+            'agent_version' => Version::VERSION,
+            'guard_version' => $this->config->guardVersion,
+            'guard_core_version' => $this->config->guardCoreVersion,
+        ];
+
+        try {
+            $json = Json::encode($envelope);
+        } catch (SerializationException $error) {
+            $this->logger->error(
+                "Aborting encrypted POST to {$encryptedUrl}; payload serialization failed and batch retained: " . $error->getMessage()
+            );
+            ErrorHook::fire($this->config->onError, $this->logger, 'encryption', $error, ['endpoint' => $encryptedUrl]);
+
+            return false;
+        }
+
+        $headers = $this->defaultHeaders;
+        $body = $json;
+        if ($this->config->compressionEnabled && strlen($body) >= $this->config->compressionThreshold) {
+            $body = (string) gzencode($json);
+            $headers[] = 'Content-Encoding: gzip';
+        }
+        $signature = Signer::signPayload($json, $this->config->payloadSigningSecret);
+        if ($signature !== null) {
+            $headers[] = 'X-Payload-Signature: ' . $signature;
+        }
+        $this->bytesSent += strlen($body);
+
+        [$status, $responseHeaders, $responseBody] = $this->execute($encryptedUrl, $headers, $body, '/api/v1/events/encrypted');
+
+        return $this->handleResponse($status, $responseHeaders, $responseBody, $encryptedUrl);
     }
 
     /**
