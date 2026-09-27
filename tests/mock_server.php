@@ -6,6 +6,7 @@
  * verified wire contract:
  *
  * - POST /api/v1/events | /api/v1/metrics | /api/v1/status
+ * - GET  /api/v1/rules (scripted with the "rules" script kind)
  * - 413 when the (decompressed) body exceeds 262144 bytes
  *   (guard-core-api services/payload_size_guard.py).
  * - X-Payload-Signature verified over the UNCOMPRESSED body: the real server
@@ -39,6 +40,7 @@ $kind = match ($path) {
     '/api/v1/events' => 'events',
     '/api/v1/metrics' => 'metrics',
     '/api/v1/status' => 'status',
+    '/api/v1/rules' => 'rules',
     // Encrypted batches share the events script kind.
     '/api/v1/events/encrypted' => 'events',
     default => null,

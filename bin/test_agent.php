@@ -30,6 +30,8 @@ use RenzoFranceschini\GuardAgent\GuardAgent;
 use RenzoFranceschini\GuardAgent\Install\InstallId;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
 use RenzoFranceschini\GuardAgent\Model\AgentStatus;
+use RenzoFranceschini\GuardAgent\Model\DynamicRules;
+use RenzoFranceschini\GuardAgent\Exception\InvalidRulesException;
 use RenzoFranceschini\GuardAgent\Model\SecurityEvent;
 use RenzoFranceschini\GuardAgent\Model\SecurityMetric;
 use RenzoFranceschini\GuardAgent\Model\WireFormat;
@@ -264,6 +266,11 @@ final class RecordingTransport implements TransportInterface
     /** @var list<AgentStatus> */
     public array $statusCalls = [];
 
+    public int $rulesRequests = 0;
+
+    /** @var list<DynamicRules|null|Throwable> */
+    public array $rulesOutcomes = [];
+
     public int $initialized = 0;
 
     public int $closed = 0;
@@ -300,6 +307,20 @@ final class RecordingTransport implements TransportInterface
             return true;
         }
         $outcome = array_shift($this->metricOutcomes);
+        if ($outcome instanceof Throwable) {
+            throw $outcome;
+        }
+
+        return $outcome;
+    }
+
+    public function fetchDynamicRules(): ?DynamicRules
+    {
+        $this->rulesRequests++;
+        if ($this->rulesOutcomes === []) {
+            return null;
+        }
+        $outcome = array_shift($this->rulesOutcomes);
         if ($outcome instanceof Throwable) {
             throw $outcome;
         }
@@ -533,6 +554,7 @@ $t->throws(ConfigException::class, static fn () => makeConfig(['apiKey' => 'shor
 $t->throws(ConfigException::class, static fn () => makeConfig(['endpoint' => 'ftp://x.example']), 'non-http endpoint rejected');
 $t->throws(ConfigException::class, static fn () => AgentConfigResolver::normalizeEndpoint('', new SilentLogger()), 'empty endpoint rejected');
 $t->throws(ConfigException::class, static fn () => makeConfig(['statusInterval' => 59]), 'statusInterval below 60 rejected');
+$t->throws(ConfigException::class, static fn () => makeConfig(['dynamicRuleInterval' => 59]), 'dynamicRuleInterval below 60 rejected');
 $t->throws(ConfigException::class, static fn () => makeConfig(['highWatermarkRatio' => 1.5]), 'highWatermarkRatio above 1 rejected');
 $t->throws(ConfigException::class, static fn () => makeConfig(['retryAttempts' => -1]), 'negative retryAttempts rejected');
 $t->throws(ConfigException::class, static fn () => makeConfig(['redis' => ['url' => 'mysql://x']]), 'non-redis url rejected');
@@ -544,6 +566,7 @@ $t->same('https://ingest.example.test', $config->endpoint, 'endpoint kept as con
 $t->same(100, $config->bufferSize, 'default bufferSize is 100');
 $t->same(30, $config->flushInterval, 'default flushInterval is 30');
 $t->same(300, $config->statusInterval, 'default statusInterval is 300');
+$t->same(300, $config->dynamicRuleInterval, 'default dynamicRuleInterval is 300');
 $t->same(BufferOverflowPolicy::Drop, $config->bufferOverflowPolicy, 'default overflow policy is drop');
 $t->same(['authorization', 'proxy-authorization', 'cookie', 'x-api-key'], $config->sensitiveHeaders, 'default sensitive headers');
 $t->same(30, $config->timeout, 'default timeout is 30s');
@@ -564,6 +587,13 @@ $snake = AgentConfigResolver::resolve([
 ]);
 $t->same(7, $snake->bufferSize, 'snake_case input keys accepted');
 $t->same(BufferOverflowPolicy::Block, $snake->bufferOverflowPolicy, 'policy parsed from string');
+
+$rulesIntervalSnake = AgentConfigResolver::resolve([
+    'apiKey' => 'test-api-key-123',
+    'dynamic_rule_interval' => 120,
+    'logger' => new SilentLogger(),
+]);
+$t->same(120, $rulesIntervalSnake->dynamicRuleInterval, 'snake_case dynamic_rule_interval accepted');
 
 $redisResolved = AgentConfigResolver::resolve([
     'apiKey' => 'test-api-key-123',
@@ -640,6 +670,84 @@ $t->same(
     array_keys($statusWire),
     'status wire payload keys'
 );
+
+// --- Dynamic rules model (mirrors DynamicRules, guard_agent/models.py) ---
+$rules = DynamicRules::normalize([
+    'rule_id' => 'rule-42',
+    'version' => 7,
+    'timestamp' => '2026-09-27T10:00:00+00:00',
+    'expires_at' => '2026-09-28T10:00:00+00:00',
+    'ttl' => 120,
+    'ip_blacklist' => ['10.0.0.1', '10.0.0.2'],
+    'ip_whitelist' => ['192.168.1.1'],
+    'ip_ban_duration' => 7200,
+    'blocked_countries' => ['CN', 'RU'],
+    'whitelist_countries' => ['US'],
+    'global_rate_limit' => 500,
+    'global_rate_window' => 60,
+    'endpoint_rate_limits' => ['/login' => [5, 60]],
+    'blocked_cloud_providers' => ['AWS', 'AWS', 'GCP'],
+    'blocked_user_agents' => ['curl/*'],
+    'suspicious_patterns' => ['union select'],
+    'enable_penetration_detection' => true,
+    'enable_ip_banning' => false,
+    'emergency_mode' => true,
+    'emergency_whitelist' => ['203.0.113.9'],
+    'emergency_whitelist_only' => true,
+    'message' => 'lockdown',
+]);
+$t->same('rule-42', $rules->ruleId, 'rules: rule_id parsed');
+$t->same(7, $rules->version, 'rules: version parsed');
+$t->same('2026-09-27T10:00:00+00:00', $rules->timestamp?->format(DATE_ATOM), 'rules: ISO timestamp parsed');
+$t->same('2026-09-28T10:00:00+00:00', $rules->expiresAt?->format(DATE_ATOM), 'rules: expires_at parsed');
+$t->same(120, $rules->ttl, 'rules: ttl parsed (drives the cache)');
+$t->same(['10.0.0.1', '10.0.0.2'], $rules->ipBlacklist, 'rules: ip_blacklist parsed');
+$t->same(['192.168.1.1'], $rules->ipWhitelist, 'rules: ip_whitelist parsed');
+$t->same(7200, $rules->ipBanDuration, 'rules: ip_ban_duration parsed');
+$t->same(['CN', 'RU'], $rules->blockedCountries, 'rules: blocked_countries parsed');
+$t->same(['US'], $rules->whitelistCountries, 'rules: whitelist_countries parsed');
+$t->same(500, $rules->globalRateLimit, 'rules: global_rate_limit parsed');
+$t->same(60, $rules->globalRateWindow, 'rules: global_rate_window parsed');
+$t->same(['/login' => [5, 60]], $rules->endpointRateLimits, 'rules: endpoint_rate_limits parsed as [requests, window] pairs');
+$t->same(['AWS', 'GCP'], $rules->blockedCloudProviders, 'rules: blocked_cloud_providers deduped like the Python set');
+$t->same(['curl/*'], $rules->blockedUserAgents, 'rules: blocked_user_agents parsed');
+$t->same(['union select'], $rules->suspiciousPatterns, 'rules: suspicious_patterns parsed');
+$t->same(true, $rules->enablePenetrationDetection, 'rules: enable_penetration_detection parsed');
+$t->same(false, $rules->enableIpBanning, 'rules: enable_ip_banning parsed');
+$t->same(null, $rules->enableRateLimiting, 'rules: absent override stays null');
+$t->same(null, $rules->autoBanThreshold, 'rules: absent auto_ban_threshold stays null');
+$t->same(true, $rules->emergencyMode, 'rules: emergency_mode parsed');
+$t->same(true, $rules->emergencyWhitelistOnly, 'rules: emergency_whitelist_only parsed');
+$t->same('lockdown', $rules->message, 'rules: message parsed');
+
+$defaultRules = DynamicRules::normalize(['unknown_field' => 'ignored', 'another' => ['x']]);
+$t->same('default-rule', $defaultRules->ruleId, 'rules: default rule_id');
+$t->same(1, $defaultRules->version, 'rules: default version');
+$t->ok($defaultRules->timestamp !== null, 'rules: timestamp defaults to now');
+$t->same(null, $defaultRules->expiresAt, 'rules: expires_at defaults to null');
+$t->same(300, $defaultRules->ttl, 'rules: default ttl 300');
+$t->same([], $defaultRules->ipBlacklist, 'rules: empty ip_blacklist default');
+$t->same([], $defaultRules->endpointRateLimits, 'rules: empty endpoint_rate_limits default');
+$t->same([], $defaultRules->blockedCloudProviders, 'rules: empty blocked_cloud_providers default');
+$t->same(3600, $defaultRules->ipBanDuration, 'rules: default ip_ban_duration 3600');
+$t->same(false, $defaultRules->emergencyMode, 'rules: default emergency_mode false');
+$t->same(null, $defaultRules->message, 'rules: default message null');
+$t->ok(!isset($defaultRules->unknown_field), 'rules: unknown fields ignored');
+
+$camelRules = DynamicRules::normalize(['ruleId' => 'camel-1', 'ipBlacklist' => ['10.0.0.3'], 'ttl' => 1]);
+$t->same('camel-1', $camelRules->ruleId, 'rules: camelCase keys accepted');
+$t->same(['10.0.0.3'], $camelRules->ipBlacklist, 'rules: camelCase ipBlacklist accepted');
+
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize('a string'), 'rules: non-array payload rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['ip_blacklist' => 'not-a-list']), 'rules: scalar ip_blacklist rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['ip_blacklist' => [1]]), 'rules: non-string ip_blacklist entry rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['endpoint_rate_limits' => ['/x' => [5]]]), 'rules: one-element endpoint pair rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['endpoint_rate_limits' => 'nope']), 'rules: scalar endpoint_rate_limits rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['enable_ip_banning' => 'yes']), 'rules: non-boolean override rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['auto_ban_threshold' => 0]), 'rules: auto_ban_threshold below 1 rejected (ge=1)');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['auto_ban_duration' => 0]), 'rules: auto_ban_duration below 1 rejected (ge=1)');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['timestamp' => 'nope']), 'rules: invalid timestamp rejected');
+$t->same(0, DynamicRules::normalize(['version' => 0])->version, 'rules: version 0 kept (no ge constraint in the pydantic model)');
 
 // =====================================================================
 // 3. Shared utilities
@@ -1507,6 +1615,149 @@ proc_terminate($encProc);
 proc_close($encProc);
 @unlink($encControlFile);
 @unlink($encStateFile);
+
+// =====================================================================
+// Dynamic rules: transport GET, TTL cache, host-driven loop, stats
+// =====================================================================
+$t->section('dynamic rules (transport + agent)');
+
+[$rulesProc, $rulesPort, $rulesControlFile, $rulesStateFile] = startMockServer();
+$rulesOverrides = [
+    'endpoint' => "http://127.0.0.1:{$rulesPort}",
+    'retryAttempts' => 2,
+    'backoffFactor' => 0.01,
+    'timeout' => 10,
+];
+$rulesPayload = [
+    'rule_id' => 'rule-e2e',
+    'ttl' => 300,
+    'ip_blacklist' => ['203.0.113.100'],
+    'endpoint_rate_limits' => ['/api/login' => [10, 60]],
+    'blocked_cloud_providers' => ['AWS'],
+];
+$serveRules = static function () use ($rulesControlFile, $rulesPayload): void {
+    setScript($rulesControlFile, ['rules' => [['status' => 200, 'body' => $rulesPayload]]]);
+};
+
+// Happy path: GET /api/v1/rules, normalized into DynamicRules.
+flushState($rulesStateFile);
+$serveRules();
+$rulesTransport = new HttpTransport(makeConfig($rulesOverrides));
+$fetched = $rulesTransport->fetchDynamicRules();
+$t->ok($fetched instanceof DynamicRules, 'transport: fetchDynamicRules returns DynamicRules');
+$t->same('rule-e2e', $fetched?->ruleId, 'transport: payload normalized');
+$t->same(['203.0.113.100'], $fetched?->ipBlacklist, 'transport: rules fields survive the round trip');
+$rulesRecords = stateFor($rulesStateFile, '/api/v1/rules');
+$t->same(1, count($rulesRecords), 'transport: single GET request');
+$t->same('GET', $rulesRecords[0]['method'] ?? null, 'transport: rules fetched with GET');
+$t->same(1, $rulesTransport->requestsSent, 'transport: successful dict 200 counts requestsSent');
+
+// Transient failure retried, then success.
+flushState($rulesStateFile);
+setScript($rulesControlFile, ['rules' => [500, ['status' => 200, 'body' => $rulesPayload]]]);
+$retryTransport = new HttpTransport(makeConfig($rulesOverrides));
+$fetched = $retryTransport->fetchDynamicRules();
+$t->same('rule-e2e', $fetched?->ruleId, 'transport: retry succeeds after a transient 500');
+$t->same([500, 200], statuses(stateFor($rulesStateFile, '/api/v1/rules')), 'transport: exactly two GET attempts observed');
+
+// All attempts fail: null result, failed-request bookkeeping.
+flushState($rulesStateFile);
+setScript($rulesControlFile, ['rules' => [500, 500, 500]]);
+$failTransport = new HttpTransport(makeConfig(['retryAttempts' => 2] + $rulesOverrides));
+$t->same(null, $failTransport->fetchDynamicRules(), 'transport: null when all attempts fail');
+$t->same([500, 500, 500], statuses(stateFor($rulesStateFile, '/api/v1/rules')), 'transport: initial attempt plus two retries');
+$t->same(1, $failTransport->requestsFailed, 'transport: giveup records a failed request (exhaustion path)');
+
+// 429 honors Retry-After (0s here so the test does not sleep).
+flushState($rulesStateFile);
+setScript($rulesControlFile, ['rules' => [['status' => 429, 'retryAfter' => 0], ['status' => 200, 'body' => $rulesPayload]]]);
+$limitedTransport = new HttpTransport(makeConfig($rulesOverrides));
+$fetched = $limitedTransport->fetchDynamicRules();
+$t->same('rule-e2e', $fetched?->ruleId, 'transport: 429 Retry-After is honored and retried');
+
+// 200 with a non-dict body is not a rules document: failed attempts, null.
+flushState($rulesStateFile);
+setScript($rulesControlFile, ['rules' => [['status' => 200, 'body' => ['a-list-not-a-dict']]]]);
+$listTransport = new HttpTransport(makeConfig(['retryAttempts' => 0] + $rulesOverrides));
+$t->same(null, $listTransport->fetchDynamicRules(), 'transport: non-dict 200 yields null');
+
+// Malformed rules payload surfaces null (the transport catches and logs).
+flushState($rulesStateFile);
+setScript($rulesControlFile, ['rules' => [['status' => 200, 'body' => ['ip_blacklist' => 5]]]]);
+$badTransport = new HttpTransport(makeConfig(['retryAttempts' => 0] + $rulesOverrides));
+$t->same(null, $badTransport->fetchDynamicRules(), 'transport: malformed rules payload yields null');
+
+// Agent TTL cache: within the ttl the cached copy is served.
+$cacheTransport = new RecordingTransport();
+$cacheTransport->rulesOutcomes = [DynamicRules::normalize(['rule_id' => 'cached-1', 'ttl' => 300])];
+$cacheAgent = makeAgent([], $cacheTransport);
+$cached = $cacheAgent->getDynamicRules();
+$t->same('cached-1', $cached?->ruleId, 'agent: first call fetches and returns the rules');
+$t->same(1, $cacheTransport->rulesRequests, 'agent: first call hit the transport');
+$cached = $cacheAgent->getDynamicRules();
+$t->same('cached-1', $cached?->ruleId, 'agent: cached copy served within the ttl');
+$t->same(1, $cacheTransport->rulesRequests, 'agent: no transport hit within the ttl');
+$stats = $cacheAgent->getStats();
+$t->same(1, $stats['rulesFetched'], 'stats: rulesFetched counted on refresh');
+$t->same(true, $stats['cachedRules'], 'stats: cachedRules true while a copy is held');
+$t->ok($stats['rulesLastUpdate'] > 0, 'stats: rulesLastUpdate stamped');
+
+// After the ttl expires the next call refetches.
+refl($cacheAgent, 'rulesLastUpdate')->setValue($cacheAgent, microtime(true) - 301);
+$cacheTransport->rulesOutcomes = [DynamicRules::normalize(['rule_id' => 'cached-2', 'ttl' => 300])];
+$refreshed = $cacheAgent->getDynamicRules();
+$t->same('cached-2', $refreshed?->ruleId, 'agent: refetch after the ttl expired');
+$t->same(2, $cacheTransport->rulesRequests, 'agent: refetch hit the transport');
+$t->same(2, $cacheAgent->getStats()['rulesFetched'], 'stats: rulesFetched counted per refresh');
+
+// A failed refresh returns null but keeps the last good rules cached.
+refl($cacheAgent, 'rulesLastUpdate')->setValue($cacheAgent, microtime(true) - 301);
+$cacheTransport->rulesOutcomes = [null];
+$t->same(null, $cacheAgent->getDynamicRules(), 'agent: failed refresh surfaces null');
+$cached = refl($cacheAgent, 'cachedRules')->getValue($cacheAgent);
+$t->same('cached-2', $cached?->ruleId, 'agent: last good rules stay cached through the failure');
+$stats = $cacheAgent->getStats();
+$t->same(2, $stats['rulesFetched'], 'stats: rulesFetched not bumped by a failed refresh');
+
+// A thrown transport error returns the cached rules (Python catch branch).
+refl($cacheAgent, 'rulesLastUpdate')->setValue($cacheAgent, microtime(true) - 301);
+$cacheTransport->rulesOutcomes = [new RuntimeException('boom')];
+$cached = $cacheAgent->getDynamicRules();
+$t->same('cached-2', $cached?->ruleId, 'agent: thrown fetch error falls back to the cached rules');
+
+// No cache and a failed fetch: null, no throw.
+$freshTransport = new RecordingTransport();
+$freshTransport->rulesOutcomes = [null];
+$freshAgent = makeAgent([], $freshTransport);
+$t->same(null, $freshAgent->getDynamicRules(), 'agent: null when there is no cache and the fetch fails');
+
+// Host-driven rules loop via tick(): polls on the interval, counts
+// consecutive failures through the stats surface.
+$loopTransport = new RecordingTransport();
+$loopTransport->rulesOutcomes = [DynamicRules::normalize(['rule_id' => 'loop-1', 'ttl' => 0])];
+$loopAgent = makeAgent(['dynamicRuleInterval' => 60], $loopTransport);
+$loopAgent->start();
+$loopAgent->tick();
+$t->same(0, $loopTransport->rulesRequests, 'loop: nothing fetched before the interval elapses');
+refl($loopAgent, 'nextRulesRefreshAt')->setValue($loopAgent, microtime(true) - 1);
+$loopAgent->tick();
+$t->same(1, $loopTransport->rulesRequests, 'loop: rules fetched once the interval elapsed');
+$t->same(0, $loopAgent->getStats()['loopFailures']['rules'], 'loop: success resets the failure counter');
+
+// Failed polls increment the consecutive counter like the other loops.
+for ($i = 0; $i < 3; $i++) {
+    refl($loopAgent, 'nextRulesRefreshAt')->setValue($loopAgent, microtime(true) - 1);
+    $loopAgent->tick();
+}
+$stats = $loopAgent->getStats();
+$t->same(3, $stats['loopFailures']['rules'], 'loop: consecutive failures counted in loopFailures.rules');
+$t->same(1, $stats['rulesFetched'], 'loop: no successful refresh during the failure streak');
+$loopAgent->stop();
+
+proc_terminate($rulesProc);
+proc_close($rulesProc);
+@unlink($rulesControlFile);
+@unlink($rulesStateFile);
 
 proc_terminate($proc);
 proc_close($proc);

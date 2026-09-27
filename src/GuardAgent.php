@@ -10,6 +10,7 @@ use RenzoFranceschini\GuardAgent\EventBuffer\EventBuffer;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
 use RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger;
 use RenzoFranceschini\GuardAgent\Model\AgentStatus;
+use RenzoFranceschini\GuardAgent\Model\DynamicRules;
 use RenzoFranceschini\GuardAgent\Model\SecurityEvent;
 use RenzoFranceschini\GuardAgent\Model\SecurityMetric;
 use RenzoFranceschini\GuardAgent\Model\WireFormat;
@@ -98,6 +99,16 @@ final class GuardAgent
     private int $statusConsecutiveFailures = 0;
 
     private ?bool $lastStatusPushOk = null;
+
+    private int $rulesConsecutiveFailures = 0;
+
+    private ?float $nextRulesRefreshAt = null;
+
+    private ?DynamicRules $cachedRules = null;
+
+    private float $rulesLastUpdate = 0.0;
+
+    public int $rulesFetched = 0;
 
     private int $eventsFailureStreak = 0;
 
@@ -201,6 +212,7 @@ final class GuardAgent
 
             $this->running = true;
             $this->nextStatusPushAt = microtime(true) + $this->config->statusInterval;
+            $this->nextRulesRefreshAt = microtime(true) + $this->config->dynamicRuleInterval;
 
             $this->logger->info('Guard Agent started successfully');
         } catch (\Throwable $error) {
@@ -222,6 +234,7 @@ final class GuardAgent
         $this->closed = true;
         $this->running = false;
         $this->nextStatusPushAt = null;
+        $this->nextRulesRefreshAt = null;
 
         $this->flushBuffer();
         try {
@@ -261,7 +274,8 @@ final class GuardAgent
 
     /**
      * Host-driven heartbeat: flush when the high-watermark or flush interval
-     * triggers, push a status report when the status interval elapses. Call
+     * triggers, push a status report when the status interval elapses, and
+     * refresh the dynamic rules when the dynamic rule interval elapses. Call
      * this from your worker loop or once per request. Never throws.
      */
     public function tick(): void
@@ -272,6 +286,7 @@ final class GuardAgent
             }
             $this->flushIfNeeded();
             $this->maybePushStatus();
+            $this->maybeRefreshRules();
         } catch (\Throwable $error) {
             $this->logger->error('Error in agent tick: ' . ErrorHook::message($error));
         }
@@ -348,6 +363,72 @@ final class GuardAgent
             $this->logger->error($message);
         } else {
             $this->logger->warning($message);
+        }
+    }
+
+    /**
+     * Refresh the dynamic rules when the rules interval elapsed. In the
+     * Python agent this is the rules loop; here it is driven by tick().
+     * A null refresh counts as a consecutive loop failure (the transport
+     * logs the underlying cause and returns null), mirroring the loop
+     * failure bookkeeping of the other loops.
+     */
+    private function maybeRefreshRules(): void
+    {
+        $now = microtime(true);
+        if ($this->nextRulesRefreshAt === null || $now < $this->nextRulesRefreshAt) {
+            return;
+        }
+        $this->nextRulesRefreshAt = $now + $this->config->dynamicRuleInterval;
+
+        $rules = $this->getDynamicRules();
+        if ($rules !== null) {
+            $this->rulesConsecutiveFailures = 0;
+
+            return;
+        }
+        $this->rulesConsecutiveFailures++;
+        $this->logLoopFailure('rules loop', $this->rulesConsecutiveFailures, 'fetch returned null');
+    }
+
+    // ------------------------------------------------------------------
+    // Dynamic rules (never throws)
+    // ------------------------------------------------------------------
+
+    /**
+     * Return the latest dynamic rules, or null when unavailable (mirrors
+     * RulesMixin.get_dynamic_rules, guard_agent/_client_loops.py:19-38). The
+     * cached copy is served while it is younger than its own ttl (seconds);
+     * a failed fetch returns the previously fetched rules so an outage never
+     * surfaces as a hard failure (the transport logs and returns null).
+     */
+    public function getDynamicRules(): ?DynamicRules
+    {
+        try {
+            $currentTime = microtime(true);
+
+            if (
+                $this->cachedRules !== null
+                && $currentTime - $this->rulesLastUpdate < $this->cachedRules->ttl
+            ) {
+                return $this->cachedRules;
+            }
+
+            $rules = $this->transport->fetchDynamicRules();
+            if ($rules !== null) {
+                $this->cachedRules = $rules;
+                $this->rulesLastUpdate = $currentTime;
+                $this->rulesFetched++;
+                $this->logger->debug('Dynamic rules updated');
+
+                return $rules;
+            }
+
+            return null;
+        } catch (\Throwable $error) {
+            $this->logger->error('Failed to fetch dynamic rules: ' . ErrorHook::message($error));
+
+            return $this->cachedRules;
         }
     }
 
@@ -636,8 +717,12 @@ final class GuardAgent
             'loopFailures' => [
                 'flush' => $this->flushConsecutiveFailures,
                 'status' => $this->statusConsecutiveFailures,
+                'rules' => $this->rulesConsecutiveFailures,
             ],
             'lastStatusPushOk' => $this->lastStatusPushOk,
+            'rulesFetched' => $this->rulesFetched,
+            'cachedRules' => $this->cachedRules !== null,
+            'rulesLastUpdate' => $this->rulesLastUpdate,
         ];
     }
 

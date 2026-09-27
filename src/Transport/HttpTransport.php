@@ -17,6 +17,7 @@ use RenzoFranceschini\GuardAgent\Install\InstallId;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
 use RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger;
 use RenzoFranceschini\GuardAgent\Model\AgentStatus;
+use RenzoFranceschini\GuardAgent\Model\DynamicRules;
 use RenzoFranceschini\GuardAgent\Model\SecurityEvent;
 use RenzoFranceschini\GuardAgent\Model\SecurityMetric;
 use RenzoFranceschini\GuardAgent\Utils\Backoff;
@@ -41,6 +42,7 @@ use RenzoFranceschini\GuardAgent\Model\WireFormat;
  * - POST {endpoint}/api/v1/events   -> BatchTelemetryRequest  (telemetry_router.py:223)
  * - POST {endpoint}/api/v1/metrics  -> BatchTelemetryRequest  (telemetry_router.py:311)
  * - POST {endpoint}/api/v1/status   -> AgentStatusRequest     (telemetry_router.py:290)
+ * - GET  {endpoint}/api/v1/rules    -> DynamicRules           (dynamic rules surface)
  * - Auth: X-API-Key required; X-Project-Id optional
  *   (telemetry_router.py:210-217); X-Agent-Install-Id for install tracking
  *   (telemetry_router.py:194); optional X-Payload-Signature HMAC over the
@@ -235,6 +237,28 @@ final class HttpTransport implements TransportInterface
         }
     }
 
+    /**
+     * Fetch dynamic rules from the SaaS platform (mirrors
+     * fetch_dynamic_rules, guard_agent/_transport_send.py:140-152). Returns
+     * null when the server has no payload or the fetch fails; never throws.
+     */
+    public function fetchDynamicRules(): ?DynamicRules
+    {
+        try {
+            $responseData = $this->getWithRetry('/api/v1/rules');
+
+            if ($responseData) {
+                return DynamicRules::normalize($responseData);
+            }
+
+            return null;
+        } catch (\Throwable $error) {
+            $this->logger->error('Failed to fetch dynamic rules: ' . ErrorHook::message($error));
+
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Batch wire building
     // ------------------------------------------------------------------
@@ -324,16 +348,15 @@ final class HttpTransport implements TransportInterface
      *
      * @return array{0: int, 1: array<string, string>, 2: string}
      */
-    private function execute(string $url, array $headers, string $body, string $endpoint): array
+    private function execute(string $url, array $headers, string $body, string $endpoint, bool $isGet = false): array
     {
+        $method = $isGet ? 'GET' : 'POST';
         $responseHeaders = [];
         $handle = curl_init($url);
         if ($handle === false) {
-            throw new GuardAgentException("HTTP client error for POST {$url}: curl_init failed");
+            throw new GuardAgentException("HTTP client error for {$method} {$url}: curl_init failed");
         }
-        curl_setopt_array($handle, [
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => $body,
+        $options = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER => $headers,
             CURLOPT_TIMEOUT => $this->config->timeout,
@@ -347,7 +370,14 @@ final class HttpTransport implements TransportInterface
 
                 return $length;
             },
-        ]);
+        ];
+        if ($isGet) {
+            $options[CURLOPT_HTTPGET] = true;
+        } else {
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = $body;
+        }
+        curl_setopt_array($handle, $options);
 
         $responseBody = curl_exec($handle);
         if ($responseBody === false) {
@@ -355,12 +385,12 @@ final class HttpTransport implements TransportInterface
             $errorMessage = (string) curl_error($handle);
             curl_close($handle);
             $label = $errorCode === CURLE_OPERATION_TIMEDOUT ? 'Timeout error' : 'HTTP client error';
-            $this->logger->error("{$label} for POST {$url}: {$errorCode} {$errorMessage}");
-            throw new GuardAgentException("{$label} for POST {$url}: {$errorCode} {$errorMessage}");
+            $this->logger->error("{$label} for {$method} {$url}: {$errorCode} {$errorMessage}");
+            throw new GuardAgentException("{$label} for {$method} {$url}: {$errorCode} {$errorMessage}");
         }
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
         curl_close($handle);
-        $this->logger->debug("Response: {$status} for POST {$url} ({$endpoint})");
+        $this->logger->debug("Response: {$status} for {$method} {$url} ({$endpoint})");
 
         return [$status, $responseHeaders, (string) $responseBody];
     }
@@ -675,6 +705,82 @@ final class HttpTransport implements TransportInterface
         }
 
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    // GET path (dynamic rules)
+    // ------------------------------------------------------------------
+
+    /**
+     * Make a GET request against the API. Failures are raised as typed
+     * errors and classified by the same handleResponse used for POSTs
+     * (mirrors _make_request("GET", endpoint, None)).
+     *
+     * @return array<string, mixed>|bool
+     */
+    private function makeGetRequest(string $endpoint): array|bool
+    {
+        if (!$this->initialized) {
+            $this->initialize();
+        }
+
+        $url = rtrim($this->config->endpoint, '/') . $endpoint;
+        [$status, $responseHeaders, $responseBody] = $this->execute($url, $this->defaultHeaders, '', $endpoint, true);
+
+        return $this->handleResponse($status, $responseHeaders, $responseBody, $url);
+    }
+
+    /**
+     * GET request with retry logic and the circuit breaker (mirrors
+     * _get_with_retry, guard_agent/_transport_send.py:238-289). Returns the
+     * parsed JSON dict, or null when the attempts are exhausted (each
+     * exhaustion path records a failed request exactly like the Python).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function getWithRetry(string $endpoint): ?array
+    {
+        for ($attempt = 0; $attempt <= $this->config->retryAttempts; $attempt++) {
+            try {
+                if (!$this->rateLimiter->acquire()) {
+                    $retryAfter = $this->rateLimiter->getRetryAfter();
+                    $this->logger->warning(sprintf('Rate limit exceeded, waiting %.1fs', $retryAfter));
+                    $this->sleep($retryAfter);
+                    continue;
+                }
+
+                $responseData = $this->circuitBreaker->call(fn (): array|bool => $this->makeGetRequest($endpoint));
+
+                if (is_array($responseData) && !array_is_list($responseData)) {
+                    $this->requestsSent++;
+
+                    return $responseData;
+                }
+                $this->requestsFailed++;
+            } catch (RateLimitedException $error) {
+                $delay = min($error->retryAfterSeconds, self::MAX_RETRY_AFTER_SECONDS);
+                $this->logger->warning(
+                    sprintf('Server rate-limited GET %s; sleeping %.1fs per Retry-After', $endpoint, $delay)
+                );
+                if ($attempt < $this->config->retryAttempts) {
+                    $this->sleep($delay);
+                } else {
+                    $this->requestsFailed++;
+                }
+            } catch (\Throwable $error) {
+                $this->logger->warning(
+                    sprintf('GET attempt %d failed for %s: %s', $attempt + 1, $endpoint, ErrorHook::message($error))
+                );
+
+                if ($attempt < $this->config->retryAttempts) {
+                    $this->sleep(Backoff::calculate($attempt, $this->config->backoffFactor, self::MAX_RETRY_BACKOFF_SECONDS));
+                } else {
+                    $this->requestsFailed++;
+                }
+            }
+        }
+
+        return null;
     }
 
     // ------------------------------------------------------------------
