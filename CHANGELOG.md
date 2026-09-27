@@ -1,5 +1,22 @@
 # Release Notes
 
+v3.1.0 (2026-09-27)
+-------------------
+
+Parity release: the 3.0.2 to 3.1.0 agent feature train (v3.1.0)
+---------------------------------------------------------------
+
+### Added
+
+- **AES-256-GCM encrypted ingest** (`src/Encryption/PayloadEncryptor.php`): batches can be encrypted end to end before they leave the host, with encryption test vectors pinned in `tests/fixtures/encryption_vectors.json`, matching the Python agent contract.
+- **Dynamic rules** (`src/Model/DynamicRules.php`): the agent pulls rule updates from the ingestion API and applies them locally, with strict validation via `InvalidRulesException`.
+- **Helper ports** (`src/Utils/`): `CanonicalJson`, `IpHasher` (hash_ip) and `PayloadTruncator` (truncate_payload), shared by the new subsystems.
+- **`on_error` and `max_payload` configuration knobs** on `AgentConfig` / `AgentConfigResolver`: operators choose the failure behavior and cap the serialized payload size.
+
+### Changed
+
+- **The reported agent version is now 3.1.0** (`RenzoFranceschini\GuardAgent\Version::VERSION`), matching this git tag; composer.json carries no version field, Packagist derives it from the tag.
+
 v3.0.2 (2026-09-24)
 -------------------
 
