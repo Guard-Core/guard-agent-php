@@ -6,7 +6,8 @@
     "require": {
         "php": "^8.2",
         "ext-json": "*",
-        "ext-curl": "*"
+        "ext-curl": "*",
+        "ext-openssl": "*"
     },
     "suggest": {
         "ext-redis": "Native phpredis client for crash-recovery persistence (optional; a dependency-free stream client is built in)",

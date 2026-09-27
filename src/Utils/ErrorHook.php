@@ -10,7 +10,7 @@ use RenzoFranceschini\GuardAgent\Log\AgentLogger;
  * Error hook plumbing, mirroring fire_error_hook (guard_agent/utils.py) and
  * the logging helpers. A hook that throws is caught and logged, never
  * propagated. Hook stages mirror the Python on_error stages: 'transport_send',
- * 'flush_events', 'flush_metrics'.
+ * 'encryption', 'flush_events', 'flush_metrics'.
  */
 final class ErrorHook
 {

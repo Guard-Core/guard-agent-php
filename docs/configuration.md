@@ -43,6 +43,7 @@ the array, as the example does).
 | `compressionEnabled` | `true` | Gzip bodies at or above the threshold |
 | `compressionThreshold` | 1024 | Gzip cutoff in bytes |
 | `payloadSigningSecret` | `null` | HMAC-SHA256 secret over the uncompressed body |
+| `projectEncryptionKey` | `null` | Urlsafe-base64 AES-256 key from the core backend. When set, event/metric batches are AES-256-GCM encrypted and POSTed to `/api/v1/events/encrypted`; an invalid key fails startup (no plaintext fallback) |
 
 ## Redaction and hooks
 

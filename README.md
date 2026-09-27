@@ -82,6 +82,10 @@ $agent->stop();       // final flush, releases Redis
 
 When `payloadSigningSecret` is set, the transport sends `X-Payload-Signature: v1=<hex>` where `<hex>` is `hash_hmac('sha256', <uncompressed JSON body>, <secret>)`. The Guard Core App ingestion API verifies the signature **after** decompressing the body (its `GzipRequestMiddleware` inflates `Content-Encoding: gzip` request bodies before the telemetry router runs), so the HMAC must always cover the uncompressed JSON bytes. This differs from the Python/TypeScript/Go agents, which sign the post-gzip bytes and silently fail verification whenever compression kicks in; the PHP agent signs what the server actually verifies.
 
+## Encryption
+
+When `projectEncryptionKey` is set (a urlsafe-base64-encoded 256-bit key issued by the core backend), event and metric batches are encrypted with AES-256-GCM and POSTed to `/api/v1/events/encrypted` as `{encrypted_payload, batch_id, agent_version, guard_version, guard_core_version}`; the wire format is byte-compatible with the Python agent (canonical JSON plaintext with `sort_keys` and `ensure_ascii`, 12-byte nonce prefix, 16-byte auth tag, padded urlsafe base64). An invalid key raises `EncryptionConfigException` at startup; the agent never falls back to plaintext. Signing and compression apply to the envelope body exactly as they do to plaintext batches.
+
 ## Persistence
 
 With `redis` configured, every accepted item is written to Redis under a globally-unique key (`{prefix}:agent_events:event_<nanos>_<8hex>`, TTL 3600s) on enqueue; on `start()` the buffer reloads whatever a previous process left behind. Every Redis failure is fail-open: logged, counted, and after 3 consecutive write failures paused for a 30s cooldown, so an unhealthy Redis cannot tax the request path. The TTL is the backstop: at worst a lost confirmation duplicates a reload, it never loses data.

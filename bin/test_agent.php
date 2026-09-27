@@ -21,7 +21,11 @@ use RenzoFranceschini\GuardAgent\Exception\BufferFullException;
 use RenzoFranceschini\GuardAgent\Exception\ConfigException;
 use RenzoFranceschini\GuardAgent\Exception\InvalidEventException;
 use RenzoFranceschini\GuardAgent\Exception\PermanentClientException;
+use RenzoFranceschini\GuardAgent\Encryption\PayloadEncryptor;
+use RenzoFranceschini\GuardAgent\Exception\EncryptionConfigException;
+use RenzoFranceschini\GuardAgent\Exception\EncryptionException;
 use RenzoFranceschini\GuardAgent\Exception\SerializationException;
+use RenzoFranceschini\GuardAgent\Utils\CanonicalJson;
 use RenzoFranceschini\GuardAgent\GuardAgent;
 use RenzoFranceschini\GuardAgent\Install\InstallId;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
@@ -1331,6 +1335,169 @@ $agent->sendEvent(makeEvent());
 $agent->flushBuffer();
 $downStats = $agent->transport instanceof HttpTransport ? $agent->transport->getStats() : [];
 $t->same($sentBefore, $downStats['requestsSent'] ?? -2, 'smoke: open breaker rejects without a request');
+
+
+// ------------------------------------------------------------------
+// AES-256-GCM encrypted ingest (H1 parity with the Python agent)
+// ------------------------------------------------------------------
+
+$t->section('encryption: PayloadEncryptor');
+
+$vectors = json_decode((string) file_get_contents(__DIR__ . '/../tests/fixtures/encryption_vectors.json'), true);
+$t->ok(is_array($vectors) && count($vectors) === 4, 'encryption: python vector fixtures load');
+
+foreach ($vectors as $index => $vector) {
+    $encryptor = new PayloadEncryptor($vector['key_b64']);
+    $decrypted = $encryptor->decrypt($vector['ciphertext_b64'], $vector['aad'] ?? null);
+    $t->same(
+        json_decode($vector['plaintext_json'], true),
+        $decrypted,
+        "encryption: decrypts python-generated vector #{$index}"
+    );
+}
+
+$t->throws(
+    EncryptionException::class,
+    static fn () => new PayloadEncryptor(''),
+    'encryption: empty key rejected'
+);
+$t->throws(
+    EncryptionException::class,
+    static fn () => new PayloadEncryptor('AAAA'),
+    'encryption: wrong key size rejected'
+);
+$t->same(null, PayloadEncryptor::create(null), 'encryption: factory returns null without a key');
+$t->ok(PayloadEncryptor::create($vectors[0]['key_b64']) instanceof PayloadEncryptor, 'encryption: factory returns encryptor with a key');
+
+$encryptor = new PayloadEncryptor($vectors[0]['key_b64']);
+$t->throws(
+    EncryptionException::class,
+    static fn () => $encryptor->decrypt($vectors[0]['tampered_ciphertext_b64']),
+    'encryption: tampered ciphertext rejected (GCM auth)'
+);
+$t->throws(
+    EncryptionException::class,
+    static fn () => $encryptor->decrypt($vectors[3]['ciphertext_b64'], 'wrong-aad'),
+    'encryption: AAD mismatch rejected'
+);
+
+$roundTrip = [
+    'events' => [['event_type' => 'rate_limit', 'ip_address' => '1.2.3.4']],
+    'metrics' => [['metric_type' => 'request_count', 'value' => 100]],
+    'zeta' => 1,
+    'unicode' => "h\u{e9}llo w\u{f6}rld \u{4f60}\u{597d}",
+];
+$ciphertext = $encryptor->encrypt($roundTrip);
+// Decryption returns sorted-key order, so compare canonical encodings.
+$t->same(CanonicalJson::encode($roundTrip), CanonicalJson::encode($encryptor->decrypt($ciphertext)), 'encryption: encrypt -> decrypt round trip');
+$t->same(0, strlen($ciphertext) % 4, 'encryption: output is padded urlsafe base64');
+$t->ok((bool) preg_match('#^[A-Za-z0-9_-]+=*$#', $ciphertext), 'encryption: output uses the urlsafe alphabet');
+$t->ok($encryptor->verifyKey(), 'encryption: verifyKey passes for a valid key');
+
+$t->ok(
+    CanonicalJson::encode(json_decode($vectors[2]['plaintext_json'], true)) === $vectors[2]['plaintext_json'],
+    'encryption: canonical JSON byte-identical to python json.dumps (unicode vector)'
+);
+$t->ok(
+    CanonicalJson::encode(json_decode($vectors[1]['plaintext_json'], true)) === $vectors[1]['plaintext_json'],
+    'encryption: canonical JSON byte-identical (batch vector)'
+);
+
+$t->throws(
+    EncryptionConfigException::class,
+    static function (): void {
+        $transport = new HttpTransport(makeConfig([
+            'endpoint' => 'https://ingest.example.test',
+            'projectEncryptionKey' => 'not-a-valid-key',
+        ]));
+        $transport->initialize();
+    },
+    'encryption: invalid key fails startup without plaintext fallback'
+);
+
+$t->section('encryption: encrypted ingest against the mock server');
+
+$encControlFile = (string) tempnam(sys_get_temp_dir(), 'gaph-control');
+$encStateFile = (string) tempnam(sys_get_temp_dir(), 'gaph-state');
+file_put_contents($encControlFile, json_encode(['script' => new stdClass()]));
+file_put_contents($encStateFile, '');
+$encEnv = getenv();
+$encEnv['MOCK_CONTROL_FILE'] = $encControlFile;
+$encEnv['MOCK_STATE_FILE'] = $encStateFile;
+$encPort = 18000 + random_int(0, 2000);
+$encProc = proc_open(
+    [PHP_BINARY, '-S', "127.0.0.1:{$encPort}", __DIR__ . '/../tests/mock_server.php'],
+    [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+    $pipes,
+    dirname(__DIR__),
+    $encEnv
+);
+$encReady = false;
+for ($i = 0; $i < 100; $i++) {
+    $conn = @fsockopen('127.0.0.1', $encPort, $e, $es, 0.2);
+    if ($conn !== false) {
+        fclose($conn);
+        $encReady = true;
+        break;
+    }
+    usleep(100_000);
+}
+$t->ok($encReady, 'encryption: mock server ready');
+
+$encConfig = makeConfig([
+    'endpoint' => "http://127.0.0.1:{$encPort}",
+    'retryAttempts' => 0,
+    'projectEncryptionKey' => $vectors[0]['key_b64'],
+]);
+$encTransport = new HttpTransport($encConfig);
+$encTransport->sendEvents([makeEvent()]);
+$encRecords = stateFor($encStateFile, '/api/v1/events/encrypted');
+$t->same(1, count($encRecords), 'encryption: events batch routed to /api/v1/events/encrypted');
+$t->same(0, count(stateFor($encStateFile, '/api/v1/events')), 'encryption: plaintext events endpoint untouched');
+if (isset($encRecords[0])) {
+    $envelope = $encRecords[0]['body_json'] ?? [];
+    $t->same(
+        ['encrypted_payload', 'batch_id', 'agent_version', 'guard_version', 'guard_core_version'],
+        array_keys($envelope),
+        'encryption: envelope carries the python fields'
+    );
+    $inner = (new PayloadEncryptor($vectors[0]['key_b64']))->decrypt((string) $envelope['encrypted_payload']);
+    $t->same(['events', 'metrics'], array_keys($inner), 'encryption: envelope decrypts to events+metrics');
+    $t->same('penetration_attempt', $inner['events'][0]['event_type'] ?? null, 'encryption: decrypted event survives the round trip');
+}
+
+flushState($encStateFile);
+$encTransport->sendMetrics([makeMetric()]);
+$t->same(1, count(stateFor($encStateFile, '/api/v1/events/encrypted')), 'encryption: metrics batch routed to the encrypted endpoint');
+
+flushState($encStateFile);
+$encTransport->sendStatus(new AgentStatus(
+    new \DateTimeImmutable(),
+    'healthy',
+    1.0,
+    0,
+    0,
+    0,
+    null,
+    []
+));
+$t->same(1, count(stateFor($encStateFile, '/api/v1/status')), 'encryption: status report stays plaintext');
+$t->same(0, count(stateFor($encStateFile, '/api/v1/events/encrypted')), 'encryption: status not encrypted');
+
+flushState($encStateFile);
+$plainConfig = makeConfig([
+    'endpoint' => "http://127.0.0.1:{$encPort}",
+    'retryAttempts' => 0,
+]);
+$plainTransport = new HttpTransport($plainConfig);
+$plainTransport->sendEvents([makeEvent()]);
+$t->same(1, count(stateFor($encStateFile, '/api/v1/events')), 'encryption: no key configured keeps plaintext events');
+$t->same(0, count(stateFor($encStateFile, '/api/v1/events/encrypted')), 'encryption: no key configured skips encrypted endpoint');
+
+proc_terminate($encProc);
+proc_close($encProc);
+@unlink($encControlFile);
+@unlink($encStateFile);
 
 proc_terminate($proc);
 proc_close($proc);
