@@ -44,7 +44,9 @@ use RenzoFranceschini\GuardAgent\Transport\TransportInterface;
 use RenzoFranceschini\GuardAgent\Utils\Backoff;
 use RenzoFranceschini\GuardAgent\Utils\BatchId;
 use RenzoFranceschini\GuardAgent\Utils\HeadersRedactor;
+use RenzoFranceschini\GuardAgent\Utils\IpHasher;
 use RenzoFranceschini\GuardAgent\Utils\Json;
+use RenzoFranceschini\GuardAgent\Utils\PayloadTruncator;
 use RenzoFranceschini\GuardAgent\Utils\ResponseSummary;
 use RenzoFranceschini\GuardAgent\Utils\RetryAfter;
 use RenzoFranceschini\GuardAgent\Utils\Uuid;
@@ -660,6 +662,13 @@ $t->ok(!Uuid::isUuid('12345'), 'non-uuid rejected');
 
 $t->same('a b c', ResponseSummary::summarize("  a\n\t b   c  "), 'summary collapses whitespace');
 $t->ok(str_contains(ResponseSummary::summarize(str_repeat('x', 400)), '[truncated, 400 chars total]'), 'summary truncates with indicator');
+
+$t->same('abc', PayloadTruncator::truncate('abc', 10), 'truncate keeps short payload intact');
+$t->same('ab...[TRUNCATED]', PayloadTruncator::truncate('abcdef', 2), 'truncate appends the TRUNCATED indicator');
+$t->same(str_repeat('x', 5), PayloadTruncator::truncate(str_repeat('x', 5), 5), 'truncate at the boundary keeps the payload');
+$t->same(substr(hash('sha256', '1.2.3.4'), 0, 16), IpHasher::hash('1.2.3.4'), 'hash_ip is sha256 hex truncated to 16 chars');
+$t->same(substr(hash('sha256', '1.2.3.4pepper'), 0, 16), IpHasher::hash('1.2.3.4', 'pepper'), 'hash_ip mixes in the salt');
+$t->ok(!str_contains(IpHasher::hash('1.2.3.4'), '1.2.3.4'), 'hash_ip does not leak the address');
 
 $redacted = HeadersRedactor::sanitize(
     ['Authorization' => 'Bearer abc', 'nested' => ['COOKIE' => 'session=1'], 'keep' => 'yes'],
