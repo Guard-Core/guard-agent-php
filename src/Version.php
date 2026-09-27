@@ -11,7 +11,7 @@ namespace RenzoFranceschini\GuardAgent;
  */
 final class Version
 {
-    public const VERSION = '3.0.2';
+    public const VERSION = '3.1.0';
 
     /** User-Agent value sent with every request (mirrors guard-agent). */
     public const USER_AGENT = 'guard-agent/' . self::VERSION;
