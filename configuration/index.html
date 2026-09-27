@@ -683,6 +683,11 @@ the array, as the example does).</p>
 <td><code>null</code></td>
 <td>HMAC-SHA256 secret over the uncompressed body</td>
 </tr>
+<tr>
+<td><code>projectEncryptionKey</code></td>
+<td><code>null</code></td>
+<td>Urlsafe-base64 AES-256 key from the core backend. When set, event/metric batches are AES-256-GCM encrypted and POSTed to <code>/api/v1/events/encrypted</code>; an invalid key fails startup (no plaintext fallback)</td>
+</tr>
 </tbody>
 </table>
 <h2 id="redaction-and-hooks">Redaction and hooks</h2>
