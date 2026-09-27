@@ -12,9 +12,6 @@ use RenzoFranceschini\GuardAgent\Log\AgentLogger;
  * convention). Validation runs at resolve() time and raises ConfigException
  * listing every problem, mirroring GuardAgentHandler.__init__ raising
  * ValueError (guard_agent/client.py:72-74).
- *
- * The dynamic-rules loop remains dropped; project_encryption_key is
- * implemented (see Encryption\PayloadEncryptor).
  */
 final class AgentConfig
 {
@@ -31,6 +28,8 @@ final class AgentConfig
         public readonly ?string $projectId = null,
         public readonly int $bufferSize = 100,
         public readonly int $flushInterval = 30,
+        /** Dynamic rule poll interval in seconds (minimum 60). */
+        public readonly int $dynamicRuleInterval = 300,
         public readonly int $statusInterval = 300,
         public readonly float $highWatermarkRatio = 0.8,
         public readonly int $maxConcurrentFlushes = 1,

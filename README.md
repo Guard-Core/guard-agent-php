@@ -56,7 +56,7 @@ register_shutdown_function(static function () use ($agent): void {
 
 ### Long-running workers (CLI daemons, RoadRunner, Swoole-style loops)
 
-Do not reach for `pcntl_alarm` or extension timers: drive the agent from your own loop with `tick()`, which flushes when the high-watermark or the flush interval is reached and pushes status reports on the status interval.
+Do not reach for `pcntl_alarm` or extension timers: drive the agent from your own loop with `tick()`, which flushes when the high-watermark or the flush interval is reached, pushes status reports on the status interval, and refreshes the dynamic rules on the dynamic rule interval.
 
 ```php
 $agent->start();
@@ -81,6 +81,10 @@ $agent->stop();       // final flush, releases Redis
 ### The uncompressed-signature note
 
 When `payloadSigningSecret` is set, the transport sends `X-Payload-Signature: v1=<hex>` where `<hex>` is `hash_hmac('sha256', <uncompressed JSON body>, <secret>)`. The Guard Core App ingestion API verifies the signature **after** decompressing the body (its `GzipRequestMiddleware` inflates `Content-Encoding: gzip` request bodies before the telemetry router runs), so the HMAC must always cover the uncompressed JSON bytes. This differs from the Python/TypeScript/Go agents, which sign the post-gzip bytes and silently fail verification whenever compression kicks in; the PHP agent signs what the server actually verifies.
+
+## Dynamic rules
+
+`getDynamicRules()` returns the SaaS rule document from `GET /api/v1/rules` as a `DynamicRules` value object (snake_case wire keys, mirroring the Python agent's pydantic model). The fetched copy is cached in memory and served while it is younger than its own `ttl` (seconds, default 300); a failed fetch returns `null` while the last good rules stay cached for the next poll, and a thrown transport error falls back to the cached copy, so a rules outage never surfaces as a hard failure. The `tick()` loop refreshes the cache every `dynamicRuleInterval` seconds (default 300, minimum 60). Fetch statistics surface in `getStats()` as `rulesFetched`, `cachedRules`, `rulesLastUpdate`, and `loopFailures.rules`.
 
 ## Encryption
 

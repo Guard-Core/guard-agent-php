@@ -7,15 +7,28 @@ $agent = new GuardAgent($configOrArray); // validates config, restores install i
 $agent->start();      // marks running, loads crash-recovery state (may throw)
 $agent->sendEvent($event);   // ingest: never throws
 $agent->sendMetric($metric); // ingest: never throws
-$agent->tick();       // host-driven loop body: flush triggers + status push
+$agent->tick();       // host-driven loop body: flush triggers + status push + rules refresh
 $agent->flushBuffer();// force a flush cycle (never throws)
 $agent->getStatus();  // AgentStatus snapshot
 $agent->healthCheck();// true when the ingestion API is reachable and healthy
-$agent->getStats();   // buffer occupancy, drops, retries
+$agent->getDynamicRules(); // SaaS dynamic rules (TTL-cached, null on outage)
+$agent->getStats();   // buffer occupancy, drops, retries, rules counters
 $agent->stop();       // final flush, stop loops, release Redis (never throws)
 ```
 
-PHP has no background threads, so the flush and status loops of the
+## Dynamic rules
+
+`getDynamicRules()` fetches `GET /api/v1/rules` (retry, circuit breaker, and
+`Retry-After` semantics shared with the batch sends) and returns a
+`DynamicRules` value object mirroring the Python agent's pydantic model
+(snake_case wire keys). The copy is cached in memory and served while it is
+younger than its own `ttl`; a failed fetch returns `null` and keeps the last
+good rules cached, and `tick()` refreshes the cache every
+`dynamicRuleInterval` seconds (default 300, minimum 60). Counters live in
+`getStats()`: `rulesFetched`, `cachedRules`, `rulesLastUpdate`, and
+`loopFailures.rules`.
+
+PHP has no background threads, so the flush, status, and rules loops of the
 Python/TypeScript/Go agents are host-driven. Long-running workers call
 `tick()` from their own loop; request-scoped apps call `flushBuffer()` from
 `kernel.terminate` or `register_shutdown_function`. Only `start()` may

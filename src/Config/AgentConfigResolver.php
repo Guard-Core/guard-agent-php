@@ -69,6 +69,7 @@ final class AgentConfigResolver
             projectId: self::optionalStringInput($input, 'projectId', 'project_id'),
             bufferSize: self::intInput($input, 'bufferSize', 'buffer_size', 100),
             flushInterval: self::intInput($input, 'flushInterval', 'flush_interval', 30),
+            dynamicRuleInterval: self::intInput($input, 'dynamicRuleInterval', 'dynamic_rule_interval', 300),
             statusInterval: self::intInput($input, 'statusInterval', 'status_interval', 300),
             highWatermarkRatio: self::floatInput($input, 'highWatermarkRatio', 'high_watermark_ratio', 0.8),
             maxConcurrentFlushes: self::intInput($input, 'maxConcurrentFlushes', 'max_concurrent_flushes', 1),
@@ -143,6 +144,10 @@ final class AgentConfigResolver
 
         if ($config->statusInterval < 60) {
             $errors[] = 'statusInterval must be at least 60 seconds';
+        }
+
+        if ($config->dynamicRuleInterval < 60) {
+            $errors[] = 'dynamicRuleInterval must be at least 60 seconds';
         }
 
         if ($config->highWatermarkRatio <= 0 || $config->highWatermarkRatio > 1) {

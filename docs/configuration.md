@@ -28,6 +28,7 @@ the array, as the example does).
 | `bufferSize` | 100 | Per-kind queue capacity |
 | `flushInterval` | 30 | Periodic flush cadence and retry backoff base, in seconds |
 | `statusInterval` | 300 | Status report cadence, minimum 60s |
+| `dynamicRuleInterval` | 300 | Dynamic-rules poll cadence (tick-driven), minimum 60s |
 | `highWatermarkRatio` | 0.8 | Combined occupancy that triggers an early flush |
 | `maxConcurrentFlushes` | 1 | Re-entrancy bound for flushes (single-threaded PHP) |
 | `bufferOverflowPolicy` | `drop` | `drop`, `block`, or `raise` |
