@@ -1,0 +1,38 @@
+name: Semgrep
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/**'
+      - '.github/workflows/semgrep.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - '.github/workflows/semgrep.yml'
+  schedule:
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Security audit (semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    container:
+      image: semgrep/semgrep:1.177.0
+    env:
+      SEMGREP_SEND_METRICS: off
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan src with the security-audit and secrets rulesets
+        run: semgrep scan --config p/security-audit --config p/secrets --metrics=off --error --quiet src
