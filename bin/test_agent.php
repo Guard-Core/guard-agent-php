@@ -60,6 +60,10 @@ use RenzoFranceschini\GuardAgent\Version;
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// Test-only namespace shadows that let individual tests force the
+// openssl_encrypt / curl_init failure arms on demand (see the file header).
+require __DIR__ . '/../tests/namespace_shadows.php';
+
 final class T
 {
     public int $passed = 0;
@@ -1923,6 +1927,39 @@ $t->throws(
     'encryption: invalid key fails startup without plaintext fallback'
 );
 
+// A shadowed openssl_encrypt that returns false surfaces the defensive arms:
+// the false return trips encrypt's typed rethrow and, through verifyKey, the
+// startup containment that resets the encryptor and refuses plaintext
+// fallback.
+$encryptor = new PayloadEncryptor($vectors[0]['key_b64']);
+$GLOBALS['__guard_test_openssl_encrypt_fails'] = true;
+try {
+    $t->throws(
+        EncryptionException::class,
+        static fn () => $encryptor->encrypt(['k' => 'v']),
+        'encryption: an openssl_encrypt failure surfaces as EncryptionException'
+    );
+    $t->same(false, $encryptor->verifyKey(), 'encryption: verifyKey reports false when openssl_encrypt fails');
+    $failingStartup = new HttpTransport(makeConfig(['projectEncryptionKey' => $vectors[0]['key_b64']]));
+    $t->throws(
+        EncryptionConfigException::class,
+        static fn () => $failingStartup->initialize(),
+        'encryption: a failed startup round trip refuses plaintext fallback'
+    );
+    $t->same(
+        null,
+        refl($failingStartup, 'encryptor')->getValue($failingStartup),
+        'encryption: the failed startup resets the encryptor to null'
+    );
+    $t->same(
+        false,
+        refl($failingStartup, 'encryptionEnabled')->getValue($failingStartup),
+        'encryption: the failed startup leaves encryption disabled'
+    );
+} finally {
+    $GLOBALS['__guard_test_openssl_encrypt_fails'] = false;
+}
+
 $t->section('encryption: encrypted ingest against the mock server');
 
 $encControlFile = (string) tempnam(sys_get_temp_dir(), 'gaph-control');
@@ -2248,6 +2285,14 @@ $t->same(HeadersRedactor::REDACTED, $sanitizedDeep, 'nesting beyond the sanitize
 $t->same('   ', HeadersRedactor::sanitize('   ', ['authorization']), 'whitespace-only strings are returned as-is');
 $t->same(HeadersRedactor::REDACTED, HeadersRedactor::sanitize('{"a":' . str_repeat('1', 9000) . '}', ['authorization']), 'json-looking strings above the scan cap are redacted');
 $t->same('{"bad json', HeadersRedactor::sanitize('{"bad json', ['authorization']), 'malformed json strings are returned as-is');
+// A JSON-looking string whose number overflows to infinity on decode passes
+// json_decode (Inf is a valid JSON number token) but cannot re-encode, so the
+// re-encode catch returns the original string unchanged.
+$t->same(
+    '{"x": 1e999}',
+    HeadersRedactor::sanitize('{"x": 1e999}', ['authorization']),
+    'json strings that decode to non-finite floats re-encode defensively'
+);
 
 $t->section('json helpers edges');
 
@@ -2355,6 +2400,25 @@ $t->throws(
 );
 $validatorTarget = new AgentConfig('short', 'ftp://bad.example');
 $t->ok(AgentConfigResolver::validate($validatorTarget) !== [], 'validate() flags a non-http endpoint directly');
+
+// The null-candidate continue guards only fire when a helper is invoked with
+// a null alternate key; every resolver call site passes one, so the guard is
+// exercised directly (the primary key must miss first so the loop reaches the
+// null candidate).
+$optionalStringInput = new ReflectionMethod(AgentConfigResolver::class, 'optionalStringInput');
+$optionalStringInput->setAccessible(true);
+$t->same(
+    null,
+    $optionalStringInput->invoke(null, ['other' => 'v'], 'missing', null),
+    'optionalStringInput skips a null alternate key'
+);
+$stringListInput = new ReflectionMethod(AgentConfigResolver::class, 'stringListInput');
+$stringListInput->setAccessible(true);
+$t->same(
+    null,
+    $stringListInput->invoke(null, ['other' => ['v']], 'missing', null),
+    'stringListInput skips a null alternate key'
+);
 
 $t->section('install id filesystem edges');
 
@@ -2707,6 +2771,21 @@ $ghostBuffer = new EventBuffer(makeConfig());
 $ghostBuffer->initializeRedis(new RedisHandler($keysOnly, 'gatest-keys', new SilentLogger()));
 $t->same(0, $ghostBuffer->getBufferSize(), 'vanished records are skipped with a warning');
 
+// The null-handler guards in the private load helpers only fire when the
+// helpers run before initializeRedis assigns a handler; they are invoked
+// directly (they are private, so reflection is the only entry).
+$uninitializedBuffer = new EventBuffer(makeConfig());
+$loadFromRedis = new ReflectionMethod(EventBuffer::class, 'loadFromRedis');
+$loadFromRedis->setAccessible(true);
+$loadFromRedis->invoke($uninitializedBuffer);
+$loadOneEventFromRedis = new ReflectionMethod(EventBuffer::class, 'loadOneEventFromRedis');
+$loadOneEventFromRedis->setAccessible(true);
+$loadOneEventFromRedis->invoke($uninitializedBuffer, 'gatest:agent_events:orphan');
+$loadOneMetricFromRedis = new ReflectionMethod(EventBuffer::class, 'loadOneMetricFromRedis');
+$loadOneMetricFromRedis->setAccessible(true);
+$loadOneMetricFromRedis->invoke($uninitializedBuffer, 'gatest:agent_metrics:orphan');
+$t->same(0, $uninitializedBuffer->getBufferSize(), 'load helpers are no-ops before a redis handler is attached');
+
 // Metric overflow under drop policy without redis (no keys to forget).
 $keylessMetricDrop = new EventBuffer(makeConfig(['bufferSize' => 1]));
 $keylessMetricDrop->addMetric(makeMetric(['value' => 1]));
@@ -2819,6 +2898,34 @@ $edgeTransport->close();
 $t->ok($edgeTransport->getStats()['sessionClosed'], 'close marks the session closed');
 $t->same(true, $edgeTransport->sendEvents([]), 'sendEvents on an empty batch is a no-op success');
 $t->same(true, $edgeTransport->sendMetrics([]), 'sendMetrics on an empty batch is a no-op success');
+
+// A curl_init that returns false trips the handle guard in execute(); the
+// send classifies it as a transient failure and reports false. retryAttempts
+// is zeroed so the classification does not sleep.
+$curlFailTransport = new HttpTransport(makeConfig(array_merge($edgeOverrides, ['retryAttempts' => 0])));
+$GLOBALS['__guard_test_curl_init_fails'] = true;
+try {
+    $t->same(
+        false,
+        $curlFailTransport->sendEvents([makeEvent()]),
+        'a curl_init failure is contained as a transient send failure'
+    );
+} finally {
+    $GLOBALS['__guard_test_curl_init_fails'] = false;
+}
+
+// Production can only reach postEncrypted with encryption enabled, which
+// initEncryption pins to a verified encryptor; forcing the flag with a null
+// encryptor is the only way to reach the last-resort guard inside it.
+$forcedEncryptionTransport = new HttpTransport(makeConfig(['retryAttempts' => 0]));
+refl($forcedEncryptionTransport, 'encryptionEnabled')->setValue($forcedEncryptionTransport, true);
+refl($forcedEncryptionTransport, 'encryptor')->setValue($forcedEncryptionTransport, null);
+$t->same(
+    false,
+    $forcedEncryptionTransport->sendEvents([makeEvent()]),
+    'a null encryptor under a forced encryption flag fails the send'
+);
+$t->same(1, $forcedEncryptionTransport->requestsFailed, 'the forced-encryptor send counted one failure');
 
 // 201 accepted; small 409 responses exhaust the retries and return false.
 flushState($stateFile);
