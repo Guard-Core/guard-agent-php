@@ -28,50 +28,52 @@ use SebastianBergmann\CodeCoverage\Report\Thresholds;
 require __DIR__ . '/../vendor/autoload.php';
 
 const UNREACHABLE_LINES = [
-    // optionalStringInput/stringListInput "candidate === null" continue
-    // guards: every call site passes a non-null alternate key.
-    'src/Config/AgentConfigResolver.php' => [232, 300],
-    // openssl_encrypt cannot fail for a key already validated to exactly
-    // KEY_SIZE bytes (80); the EncryptionException rethrow arm is only fed by
-    // line 80 (85); verifyKey's catch cannot trigger when construction
-    // succeeded and openssl is functional (138-139).
-    'src/Encryption/PayloadEncryptor.php' => [80, 85, 138, 139],
-    // loadFromRedis/loadOne*FromRedis null-handler guards: the only caller
-    // (initializeRedis) assigns the handler first (176, 204, 233). Catches
-    // around handler calls that are themselves total (RedisHandler catches
-    // every client Throwable): keys failures (196-197), confirm deletes
-    // (271-272, 289-290), the addEvent/addMetric try arms around the
-    // internally catching persist helpers (377-378, 425-426), and
-    // clearBuffer's keys/delete loop (595-596).
-    'src/EventBuffer/EventBuffer.php' => [176, 196, 197, 204, 233, 271, 272, 289, 290, 377, 378, 425, 426, 595, 596],
-    // stop()'s close catch: RedisHandler::close is total (252-253).
-    // asMetadataArray/asStringArray fallbacks: HeadersRedactor::sanitize of
-    // an array always returns an array (778, 789).
+    // Catches around RedisHandler calls that are themselves total: keys()
+    // (196-197, 595-596), delete() (271-272, 289-290), and setKey()
+    // (377-378, 425-426, via the persist helpers whose try additionally
+    // spans uniqueKey, Json::encode, and SplObjectStorage assignment, none
+    // of which throw) each catch every client Throwable inside RedisHandler
+    // and degrade to a return value, so no Throwable can reach the buffer's
+    // own catch arms.
+    'src/EventBuffer/EventBuffer.php' => [196, 197, 271, 272, 289, 290, 377, 378, 425, 426, 595, 596],
+    // stop()'s close catch: GuardAgent::$redisHandler is the final
+    // RedisHandler (initializeRedis hard-types it) whose close() catches
+    // every Throwable (252-253). asMetadataArray/asStringArray fallbacks:
+    // the inputs are SecurityEvent::$metadata / SecurityMetric::$tags array
+    // properties passed through HeadersRedactor::sanitize, which returns an
+    // array for an array input at the top depth (778, 789).
     'src/GuardAgent.php' => [252, 253, 778, 789],
     // read()/write() catch arms over @-suppressed filesystem calls, which
-    // return false instead of throwing (76-77, 79, 95-96).
+    // return false instead of throwing (76-77, 79, 95-96): is_file($path)
+    // true implies a non-empty path, and the PHP 8 ValueErrors in this
+    // function family require an empty path, which cannot reach read()'s
+    // file_get_contents (is_file('') is false) or write()'s
+    // file_put_contents (the mkdir guard returns early for the empty dir).
     'src/Install/InstallId.php' => [76, 77, 79, 95, 96],
     // error_log fallback runs only under a web SAPI (61-62); the stream
     // fallback only fires when STDOUT is undefined AND fopen fails, and the
     // CLI SAPI defines both (68).
     'src/Log/DefaultAgentLogger.php' => [61, 62, 68],
     // new DateTimeImmutable('@' . (string)(int) $value) cannot throw for any
-    // int/float epoch on the supported 64-bit platforms (44-45).
+    // int/float epoch: the (int) cast yields an int for every float
+    // (NAN/overflow casts emit a diagnostic, not a throw) and '@<int>' is
+    // always constructible on the supported 64-bit platforms (44-45).
     'src/Model/WireFormat.php' => [44, 45],
-    // curl_init failure (357); initEncryption: create() returns non-null for
-    // every key that passes the empty guard and verifyKey() holds whenever
-    // openssl is functional (413, 417-419); postEncrypted's encryptor-null
-    // guard is implied by isEncryptedTarget checking encryptionEnabled (456);
-    // the transport-boundary redaction pass never sees arrays there because
-    // toWire() casts metadata/tags to objects (512-515, 522-525).
-    'src/Transport/HttpTransport.php' => [357, 413, 417, 418, 419, 456, 512, 513, 514, 515, 522, 523, 524, 525],
-    // json_encode of a finite float with JSON_THROW_ON_ERROR cannot fail
-    // (64-65).
+    // The transport-boundary redaction pass never sees arrays there because
+    // toWire() casts metadata/tags to objects (SecurityEvent.php:155,
+    // SecurityMetric.php:101) and makeRequest's payload always comes from
+    // buildBatchWire mapping those toWire() outputs (512-515, 522-525).
+    'src/Transport/HttpTransport.php' => [512, 513, 514, 515, 522, 523, 524, 525],
+    // json_encode of a finite float with JSON_THROW_ON_ERROR cannot fail:
+    // the is_finite guard above rejects Inf/NaN before this call is reached
+    // (asserted by the canonical json tests) and a finite float scalar has
+    // no depth, UTF-8, or type failure mode (64-65).
     'src/Utils/CanonicalJson.php' => [64, 65],
     // sanitizeValueUnsafe cannot throw for the value domain it accepts
-    // (46-47); the re-encoded sanitized structure is always json-encodable
-    // (112-113).
-    'src/Utils/HeadersRedactor.php' => [46, 47, 112, 113],
+    // (46-47): every operation is a non-throwing type check, arithmetic-free
+    // recursion, or pass-through, and its two fallible callees (json_decode
+    // at 105, Json::encode at 111) carry their own local catches.
+    'src/Utils/HeadersRedactor.php' => [46, 47],
     // json_encode with JSON_THROW_ON_ERROR never returns false (37).
     'src/Utils/Json.php' => [37],
     // phpredis 6 close() returns silently on an already-closed socket; the
