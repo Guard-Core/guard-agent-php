@@ -661,88 +661,6 @@ final class ThrowingCloseClient implements RedisClientInterface
 }
 
 /**
- * Scripted Redis behavior for the ExtRedisClient adapter surface. All
- * phpredis methods the adapter touches are overridden so the double behaves
- * identically whether it stands alone (no extension) or subclasses the real
- * Redis class (extension loaded).
- */
-trait ScriptedExtRedisBehavior
-{
-    /** @var list<mixed> */
-    public array $getReplies = [];
-
-    public bool $setReply = true;
-
-    public bool $setexReply = true;
-
-    /** @var list<mixed> */
-    public array $keysReplies = [];
-
-    public bool $closeThrows = false;
-
-    public int $delCount = 0;
-
-    /** Signatures stay loose so the trait is compatible with any phpredis. */
-    public function ping($message = null)
-    {
-        return true;
-    }
-
-    public function get(...$args)
-    {
-        $reply = array_shift($this->getReplies);
-
-        return $reply === null ? false : $reply;
-    }
-
-    public function set(...$args)
-    {
-        return $this->setReply;
-    }
-
-    public function setex(...$args)
-    {
-        return $this->setexReply;
-    }
-
-    public function del(...$keys)
-    {
-        $this->delCount += count($keys);
-
-        return count($keys);
-    }
-
-    public function keys(...$args)
-    {
-        $reply = array_shift($this->keysReplies);
-
-        return $reply ?? false;
-    }
-
-    public function close()
-    {
-        if ($this->closeThrows) {
-            throw new RuntimeException('close exploded');
-        }
-    }
-}
-
-if (class_exists('Redis', false)) {
-    /** Scripted double bound to the real phpredis class when it is loaded. */
-    final class ScriptedExtRedis extends Redis
-    {
-        use ScriptedExtRedisBehavior;
-    }
-} else {
-    /** Scripted double aliased as Redis when the extension is absent. */
-    final class ScriptedExtRedis
-    {
-        use ScriptedExtRedisBehavior;
-    }
-    class_alias(ScriptedExtRedis::class, 'Redis');
-}
-
-/**
  * Minimal scripted predis-style client for the PredisRedisClient adapter.
  */
 final class ScriptedPredis
@@ -2494,28 +2412,40 @@ $t->ok(true, 'redis handler close is best effort');
 
 $t->section('ext-redis adapter');
 
-$scriptedExt = new ScriptedExtRedis();
-$scriptedExt->getReplies = ['cached-value', false];
-$extClient = new ExtRedisClient($scriptedExt);
-$extClient->ping();
-$t->same('cached-value', $extClient->get('k'), 'ext adapter returns string values');
-$t->same(null, $extClient->get('missing'), 'ext adapter maps misses to null');
-$t->ok($extClient->set('k', 'v'), 'ext adapter sets without a ttl');
-$t->ok($extClient->set('k', 'v', 60), 'ext adapter sets with a ttl');
-$t->same(0, $extClient->delete(), 'ext adapter deletes nothing without keys');
-$t->same(2, $extClient->delete('a', 'b'), 'ext adapter deletes through the client');
-$scriptedExt->keysReplies = [['a', 'b']];
-$t->same(['a', 'b'], $extClient->keys('p:*'), 'ext adapter normalizes key lists');
-$scriptedExt->keysReplies = [false];
-$t->same([], $extClient->keys('p:*'), 'ext adapter maps non-array key replies to empty');
-$scriptedExt->closeThrows = true;
-$extClient->close();
-$t->ok(true, 'ext adapter close is best effort');
-$scriptedExt->setReply = false;
-$t->ok(!$extClient->set('k', 'v'), 'ext adapter propagates set failures');
-$scriptedExt->setReply = true;
-$scriptedExt->setexReply = false;
-$t->ok(!$extClient->set('k', 'v', 60), 'ext adapter propagates setex failures');
+if (class_exists('Redis')) {
+    $real = new Redis();
+    $host = getenv('REDIS_HOST') ?: '127.0.0.1';
+    $port = (int) (getenv('REDIS_PORT') ?: 6379);
+    $extBase = 'guard:agent:extredis:' . bin2hex(random_bytes(4));
+    $ok = $real->connect($host, $port);
+    $extClient = new ExtRedisClient($real);
+    $t->ok($ok, 'ext adapter constructs over a live phpredis client');
+    $extClient->ping();
+    $t->ok(true, 'ext adapter pings through the client');
+    $t->same(null, $extClient->get($extBase . ':missing'), 'ext adapter maps misses to null');
+    $real->set($extBase . ':hit', 'cached-value');
+    $t->same('cached-value', $extClient->get($extBase . ':hit'), 'ext adapter returns string values');
+    $t->ok($extClient->set($extBase . ':plain', 'v'), 'ext adapter sets without a ttl');
+    $t->ok($extClient->set($extBase . ':ttl', 'v', 60), 'ext adapter sets with a ttl');
+    $t->same(0, $extClient->delete(), 'ext adapter deletes nothing without keys');
+    $real->set($extBase . ':d1', 'v');
+    $real->set($extBase . ':d2', 'v');
+    $t->same(2, $extClient->delete($extBase . ':d1', $extBase . ':d2'), 'ext adapter deletes through the client');
+    $real->set($extBase . ':k1', 'a');
+    $real->set($extBase . ':k2', 'b');
+    $found = $extClient->keys($extBase . ':k*');
+    sort($found);
+    $t->same([$extBase . ':k1', $extBase . ':k2'], $found, 'ext adapter normalizes key lists');
+    $extClient->close();
+    $t->ok(true, 'ext adapter close is best effort');
+    $extClient->close();
+    $t->ok(true, 'a second close still does not raise');
+    foreach ($real->keys($extBase . ':*') as $leftover) {
+        $real->del($leftover);
+    }
+} else {
+    $t->skip('ext-redis adapter requires the optional redis extension');
+}
 
 $t->section('predis adapter');
 

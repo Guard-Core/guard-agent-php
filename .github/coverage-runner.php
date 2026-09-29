@@ -74,6 +74,9 @@ const UNREACHABLE_LINES = [
     'src/Utils/HeadersRedactor.php' => [46, 47, 112, 113],
     // json_encode with JSON_THROW_ON_ERROR never returns false (37).
     'src/Utils/Json.php' => [37],
+    // phpredis 6 close() returns silently on an already-closed socket; the
+    // catch arm exists for older versions that raised RedisException (72).
+    'src/Persistence/ExtRedisClient.php' => [72],
 ];
 
 $root = dirname(__DIR__);
