@@ -682,43 +682,44 @@ trait ScriptedExtRedisBehavior
 
     public int $delCount = 0;
 
-    public function ping(): bool
+    /** Signatures stay loose so the trait is compatible with any phpredis. */
+    public function ping($message = null)
     {
         return true;
     }
 
-    public function get(string $key): mixed
+    public function get(...$args)
     {
         $reply = array_shift($this->getReplies);
 
         return $reply === null ? false : $reply;
     }
 
-    public function set(string $key, string $value, $timeout = 0): bool
+    public function set(...$args)
     {
         return $this->setReply;
     }
 
-    public function setex(string $key, $ttl, string $value): bool
+    public function setex(...$args)
     {
         return $this->setexReply;
     }
 
-    public function del(string ...$keys): int
+    public function del(...$keys)
     {
         $this->delCount += count($keys);
 
         return count($keys);
     }
 
-    public function keys(string $pattern): mixed
+    public function keys(...$args)
     {
         $reply = array_shift($this->keysReplies);
 
         return $reply ?? false;
     }
 
-    public function close(): void
+    public function close()
     {
         if ($this->closeThrows) {
             throw new RuntimeException('close exploded');
