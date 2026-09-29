@@ -661,10 +661,12 @@ final class ThrowingCloseClient implements RedisClientInterface
 }
 
 /**
- * Scriptable Redis double with per-method scripted replies, for the
- * ExtRedisClient adapter surface.
+ * Scripted Redis behavior for the ExtRedisClient adapter surface. All
+ * phpredis methods the adapter touches are overridden so the double behaves
+ * identically whether it stands alone (no extension) or subclasses the real
+ * Redis class (extension loaded).
  */
-final class ScriptedExtRedis
+trait ScriptedExtRedisBehavior
 {
     /** @var list<mixed> */
     public array $getReplies = [];
@@ -722,6 +724,21 @@ final class ScriptedExtRedis
             throw new RuntimeException('close exploded');
         }
     }
+}
+
+if (class_exists('Redis', false)) {
+    /** Scripted double bound to the real phpredis class when it is loaded. */
+    final class ScriptedExtRedis extends Redis
+    {
+        use ScriptedExtRedisBehavior;
+    }
+} else {
+    /** Scripted double aliased as Redis when the extension is absent. */
+    final class ScriptedExtRedis
+    {
+        use ScriptedExtRedisBehavior;
+    }
+    class_alias(ScriptedExtRedis::class, 'Redis');
 }
 
 /**
@@ -2476,9 +2493,6 @@ $t->ok(true, 'redis handler close is best effort');
 
 $t->section('ext-redis adapter');
 
-if (!class_exists('Redis', false)) {
-    class_alias(ScriptedExtRedis::class, 'Redis');
-}
 $scriptedExt = new ScriptedExtRedis();
 $scriptedExt->getReplies = ['cached-value', false];
 $extClient = new ExtRedisClient($scriptedExt);
@@ -3204,12 +3218,16 @@ $agent->close();
 $t->ok(true, 'close aliases stop');
 
 // Owned redis handlers are released on stop; a failed connection degrades.
-$agent = new GuardAgent(makeConfig(['redis' => ['url' => $redisUrl]]));
-$agent->start();
-$ownedHandler = $agent->redisHandler();
-$t->ok($ownedHandler instanceof RedisHandler, 'config redis attaches a handler on start');
-$agent->stop();
-$t->same(null, $agent->redisHandler(), 'stop releases the owned handler');
+if ($redisUrl !== '') {
+    $agent = new GuardAgent(makeConfig(['redis' => ['url' => $redisUrl]]));
+    $agent->start();
+    $ownedHandler = $agent->redisHandler();
+    $t->ok($ownedHandler instanceof RedisHandler, 'config redis attaches a handler on start');
+    $agent->stop();
+    $t->same(null, $agent->redisHandler(), 'stop releases the owned handler');
+} else {
+    $t->skip('config redis lifecycle requires REDIS_HOST');
+}
 
 $logger = new CaptureLogger();
 $agent = new GuardAgent(makeConfig(['redis' => ['url' => 'redis://127.0.0.1:1/0'], 'logger' => $logger]));
