@@ -9,6 +9,9 @@
         "ext-curl": "*",
         "ext-openssl": "*"
     },
+    "require-dev": {
+        "phpunit/php-code-coverage": "^11.0"
+    },
     "suggest": {
         "ext-redis": "Native phpredis client for crash-recovery persistence (optional; a dependency-free stream client is built in)",
         "predis/predis": "Pure-PHP Redis client for crash-recovery persistence (optional; a dependency-free stream client is built in)"
