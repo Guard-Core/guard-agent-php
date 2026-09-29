@@ -84,7 +84,15 @@ if ($entry !== null) {
         header('Retry-After: ' . (string) (int) $entry['retryAfter']);
     }
     log_request($status, $uncompressed);
+    // A "__raw" body is echoed verbatim (e.g. an unparseable 200 body).
+    if (is_array($responseBody) && array_key_exists('__raw', $responseBody)) {
+        http_response_code($status);
+        echo (string) $responseBody['__raw'];
+
+        return;
+    }
     respond($status, $responseBody);
+
     return;
 }
 

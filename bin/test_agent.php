@@ -24,8 +24,12 @@ use RenzoFranceschini\GuardAgent\Exception\PermanentClientException;
 use RenzoFranceschini\GuardAgent\Encryption\PayloadEncryptor;
 use RenzoFranceschini\GuardAgent\Exception\EncryptionConfigException;
 use RenzoFranceschini\GuardAgent\Exception\EncryptionException;
+use RenzoFranceschini\GuardAgent\Exception\RedisException;
 use RenzoFranceschini\GuardAgent\Exception\SerializationException;
+use RenzoFranceschini\GuardAgent\Persistence\ExtRedisClient;
+use RenzoFranceschini\GuardAgent\Persistence\PredisRedisClient;
 use RenzoFranceschini\GuardAgent\Utils\CanonicalJson;
+use RenzoFranceschini\GuardAgent\Utils\ErrorHook;
 use RenzoFranceschini\GuardAgent\GuardAgent;
 use RenzoFranceschini\GuardAgent\Install\InstallId;
 use RenzoFranceschini\GuardAgent\Log\AgentLogger;
@@ -143,6 +147,9 @@ final class CaptureLogger implements AgentLogger
     /** @var list<string> */
     public array $warnings = [];
 
+    /** @var list<string> */
+    public array $errors = [];
+
     public function debug(string $message): void
     {
     }
@@ -158,6 +165,7 @@ final class CaptureLogger implements AgentLogger
 
     public function error(string $message): void
     {
+        $this->errors[] = $message;
     }
 }
 
@@ -541,6 +549,453 @@ function redisUrl(): string
     }
 
     return 'redis://' . $host . ':6379/0';
+}
+
+/**
+ * Redis client double whose every method throws: exercises the failure paths
+ * of RedisHandler and the EventBuffer persistence hooks.
+ */
+final class ThrowingRedisClient implements RedisClientInterface
+{
+    public function ping(): void
+    {
+        throw new RuntimeException('throwing redis client');
+    }
+
+    public function get(string $key): ?string
+    {
+        throw new RuntimeException('throwing redis client');
+    }
+
+    public function set(string $key, string $value, ?int $ttlSeconds = null): bool
+    {
+        throw new RuntimeException('throwing redis client');
+    }
+
+    public function delete(string ...$keys): int
+    {
+        throw new RuntimeException('throwing redis client');
+    }
+
+    public function keys(string $pattern): array
+    {
+        throw new RuntimeException('throwing redis client');
+    }
+
+    public function close(): void
+    {
+    }
+}
+
+/**
+ * Redis client double that fails only on close.
+ */
+/**
+ * Redis double that lists keys but never has data: exercises the startup
+ * load path for records whose value disappeared before the reload.
+ */
+final class KeysOnlyRedisClient implements RedisClientInterface
+{
+    /** @var list<string> */
+    public array $listed = [];
+
+    public function ping(): void
+    {
+    }
+
+    public function get(string $key): ?string
+    {
+        return null;
+    }
+
+    public function set(string $key, string $value, ?int $ttlSeconds = null): bool
+    {
+        return true;
+    }
+
+    public function delete(string ...$keys): int
+    {
+        return 0;
+    }
+
+    public function keys(string $pattern): array
+    {
+        return $this->listed;
+    }
+
+    public function close(): void
+    {
+    }
+}
+
+final class ThrowingCloseClient implements RedisClientInterface
+{
+    public function ping(): void
+    {
+    }
+
+    public function get(string $key): ?string
+    {
+        return null;
+    }
+
+    public function set(string $key, string $value, ?int $ttlSeconds = null): bool
+    {
+        return true;
+    }
+
+    public function delete(string ...$keys): int
+    {
+        return 0;
+    }
+
+    public function keys(string $pattern): array
+    {
+        return [];
+    }
+
+    public function close(): void
+    {
+        throw new RuntimeException('close exploded');
+    }
+}
+
+/**
+ * Scriptable Redis double with per-method scripted replies, for the
+ * ExtRedisClient adapter surface.
+ */
+final class ScriptedExtRedis
+{
+    /** @var list<mixed> */
+    public array $getReplies = [];
+
+    public bool $setReply = true;
+
+    public bool $setexReply = true;
+
+    /** @var list<mixed> */
+    public array $keysReplies = [];
+
+    public bool $closeThrows = false;
+
+    public int $delCount = 0;
+
+    public function ping(): bool
+    {
+        return true;
+    }
+
+    public function get(string $key): mixed
+    {
+        $reply = array_shift($this->getReplies);
+
+        return $reply === null ? false : $reply;
+    }
+
+    public function set(string $key, string $value, $timeout = 0): bool
+    {
+        return $this->setReply;
+    }
+
+    public function setex(string $key, $ttl, string $value): bool
+    {
+        return $this->setexReply;
+    }
+
+    public function del(string ...$keys): int
+    {
+        $this->delCount += count($keys);
+
+        return count($keys);
+    }
+
+    public function keys(string $pattern): mixed
+    {
+        $reply = array_shift($this->keysReplies);
+
+        return $reply ?? false;
+    }
+
+    public function close(): void
+    {
+        if ($this->closeThrows) {
+            throw new RuntimeException('close exploded');
+        }
+    }
+}
+
+/**
+ * Minimal scripted predis-style client for the PredisRedisClient adapter.
+ */
+final class ScriptedPredis
+{
+    public string $pingReply = 'PONG';
+
+    public mixed $getReply = null;
+
+    public bool $setReply = true;
+
+    public bool $setexReply = true;
+
+    public mixed $keysReply = [];
+
+    public function get(string $key): mixed
+    {
+        return $this->getReply;
+    }
+
+    public function set(string $key, string $value): bool
+    {
+        return $this->setReply;
+    }
+
+    public function setex(string $key, $ttl, string $value): bool
+    {
+        return $this->setexReply;
+    }
+
+    public function del(string ...$keys): int
+    {
+        return count($keys);
+    }
+
+    public function keys(string $pattern): mixed
+    {
+        return $this->keysReply;
+    }
+
+    public function ping(): string
+    {
+        return $this->pingReply;
+    }
+
+    public function disconnect(): void
+    {
+    }
+}
+
+/**
+ * Transport double with injection points for every lifecycle failure mode.
+ */
+final class StubTransport implements TransportInterface
+{
+    public bool $initializeThrows = false;
+
+    public bool $closeThrows = false;
+
+    public bool $getStatsThrows = false;
+
+    /** @var list<bool|Throwable> */
+    public array $eventOutcomes = [];
+
+    /** @var list<bool|Throwable> */
+    public array $metricOutcomes = [];
+
+    public bool|Throwable|null $statusOutcome = true;
+
+    public ?DynamicRules $rulesOutcome = null;
+
+    public string $breakerState = 'CLOSED';
+
+    public int $initialized = 0;
+
+    public int $closed = 0;
+
+    /** @var list<list<SecurityEvent>> */
+    public array $eventBatches = [];
+
+    /** @var list<list<SecurityMetric>> */
+    public array $metricBatches = [];
+
+    public function initialize(): void
+    {
+        $this->initialized++;
+        if ($this->initializeThrows) {
+            throw new RuntimeException('initialize exploded');
+        }
+    }
+
+    public function sendEvents(array $events): bool
+    {
+        $this->eventBatches[] = array_values($events);
+        if ($this->eventOutcomes === []) {
+            return true;
+        }
+        $outcome = array_shift($this->eventOutcomes);
+        if ($outcome instanceof Throwable) {
+            throw $outcome;
+        }
+
+        return $outcome;
+    }
+
+    public function sendMetrics(array $metrics): bool
+    {
+        $this->metricBatches[] = array_values($metrics);
+        if ($this->metricOutcomes === []) {
+            return true;
+        }
+        $outcome = array_shift($this->metricOutcomes);
+        if ($outcome instanceof Throwable) {
+            throw $outcome;
+        }
+
+        return $outcome;
+    }
+
+    public function sendStatus(AgentStatus $status): bool
+    {
+        if ($this->statusOutcome instanceof Throwable) {
+            throw $this->statusOutcome;
+        }
+
+        return $this->statusOutcome ?? false;
+    }
+
+    public function fetchDynamicRules(): ?DynamicRules
+    {
+        if ($this->rulesOutcome instanceof Throwable) {
+            throw $this->rulesOutcome;
+        }
+
+        return $this->rulesOutcome;
+    }
+
+    public function getStats(): array
+    {
+        if ($this->getStatsThrows) {
+            throw new RuntimeException('getStats exploded');
+        }
+
+        return [
+            'requestsSent' => 0,
+            'requestsFailed' => 0,
+            'bytesSent' => 0,
+            'circuitBreakerState' => $this->breakerState,
+            'failureCount' => 0,
+            'sessionClosed' => false,
+        ];
+    }
+
+    public function close(): void
+    {
+        $this->closed++;
+        if ($this->closeThrows) {
+            throw new RuntimeException('close exploded');
+        }
+    }
+}
+
+/**
+ * Logger that throws exactly once, on the first warning: used to prove the
+ * agent's tick() surface never propagates even a hostile logger.
+ */
+final class FickleLogger implements AgentLogger
+{
+    public bool $spent = false;
+
+    public function debug(string $message): void
+    {
+    }
+
+    public function info(string $message): void
+    {
+    }
+
+    public function warning(string $message): void
+    {
+        if (!$this->spent) {
+            $this->spent = true;
+            throw new RuntimeException('hostile logger');
+        }
+    }
+
+    public function error(string $message): void
+    {
+    }
+}
+
+/**
+ * Starts tests/fake_redis_server.php on an ephemeral port.
+ *
+ * @param list<string|list<string>> $script
+ *
+ * @return array{0: resource, 1: int, 2: string} proc, port, control file
+ */
+function startFakeRedis(array $script, string $mode = 'script'): array
+{
+    $sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+    if ($sock === false) {
+        fwrite(STDERR, "cannot pick a fake redis port: {$errstr}\n");
+        exit(1);
+    }
+    $name = (string) stream_socket_get_name($sock, false);
+    $port = (int) substr($name, (int) strrpos($name, ':') + 1);
+    fclose($sock);
+
+    $controlFile = (string) tempnam(sys_get_temp_dir(), 'gaph-redis');
+    file_put_contents($controlFile, json_encode(['mode' => $mode, 'script' => $script]));
+
+    $env = getenv();
+    $env['FAKE_REDIS_CONTROL_FILE'] = $controlFile;
+    $env['FAKE_REDIS_PORT'] = (string) $port;
+    $proc = proc_open(
+        [PHP_BINARY, __DIR__ . '/../tests/fake_redis_server.php'],
+        [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+        $pipes,
+        dirname(__DIR__),
+        $env
+    );
+    if ($proc === false) {
+        fwrite(STDERR, "cannot start fake redis server\n");
+        exit(1);
+    }
+    $ready = false;
+    for ($i = 0; $i < 100; $i++) {
+        $conn = @fsockopen('127.0.0.1', $port, $e, $es, 0.2);
+        if ($conn !== false) {
+            fclose($conn);
+            $ready = true;
+            break;
+        }
+        usleep(50_000);
+    }
+    if (!$ready) {
+        fwrite(STDERR, "fake redis server did not become ready\n");
+        exit(1);
+    }
+
+    return [$proc, $port, $controlFile];
+}
+
+/**
+ * Invoke the private constructor of a static-only class: asserts the class is
+ * final-by-construction (a private constructor forbids instantiation) and
+ * executes the constructor body.
+ */
+/**
+ * Fill a rate limiter's call log with stamps at the edge of its window so the
+ * next acquire is denied with a tiny retry-after (HttpTransport wires its own
+ * limiter, and the property is readonly).
+ */
+function saturateRateLimiter(RateLimiter $limiter): void
+{
+    $now = microtime(true);
+    $calls = array_fill(0, 100, $now - 59.9);
+    $calls[0] = $now - 59.95;
+    refl($limiter, 'calls')->setValue($limiter, $calls);
+}
+
+function assertStaticOnlyClass(T $t, string $class): void
+{
+    $reflection = new ReflectionClass($class);
+    $constructor = $reflection->getConstructor();
+    $t->ok($constructor !== null && $constructor->isPrivate(), "{$class} has a private constructor (static-only)");
+    if ($constructor !== null) {
+        $constructor->setAccessible(true);
+        $constructor->invoke($reflection->newInstanceWithoutConstructor());
+        $t->ok(true, "{$class} constructor body executes");
+    }
 }
 
 $t = new T();
@@ -1759,10 +2214,1008 @@ proc_close($rulesProc);
 @unlink($rulesControlFile);
 @unlink($rulesStateFile);
 
-proc_terminate($proc);
-proc_close($proc);
+// =====================================================================
+// 12. Static-only utility classes and their defensive edges
+// =====================================================================
+$t->section('static-only classes');
+
+foreach ([
+    CanonicalJson::class,
+    ErrorHook::class,
+    HeadersRedactor::class,
+    Json::class,
+    Backoff::class,
+    BatchId::class,
+    IpHasher::class,
+    PayloadTruncator::class,
+    ResponseSummary::class,
+    RetryAfter::class,
+    Uuid::class,
+    Signer::class,
+    WireFormat::class,
+    \RenzoFranceschini\GuardAgent\Model\KnownTypes::class,
+    AgentConfigResolver::class,
+    InstallId::class,
+] as $staticOnlyClass) {
+    assertStaticOnlyClass($t, $staticOnlyClass);
+}
+
+$t->section('canonical json edges');
+
+$t->same('false', CanonicalJson::encode(false), 'canonical json: false literal encodes');
+$t->throws(SerializationException::class, static function (): void {
+    $deep = ['x' => 1];
+    for ($i = 0; $i < 600; $i++) {
+        $deep = ['n' => $deep];
+    }
+    CanonicalJson::encode($deep);
+}, 'canonical json: nesting beyond 512 rejected');
+$t->throws(SerializationException::class, static fn () => CanonicalJson::encode(NAN), 'canonical json: NaN rejected');
+$t->throws(SerializationException::class, static fn () => CanonicalJson::encode(INF), 'canonical json: Inf rejected');
+$t->throws(SerializationException::class, static fn () => CanonicalJson::encode(fopen('php://memory', 'rb')), 'canonical json: resource rejected');
+$t->same(
+    '"2026-01-02T03:04:05.000Z"',
+    CanonicalJson::encode(new DateTimeImmutable('2026-01-02 03:04:05', new DateTimeZone('UTC'))),
+    'canonical json: DateTimeInterface renders as ISO UTC with milliseconds'
+);
+$t->same('"\\ud83d\\ude00"', CanonicalJson::encode("\u{1F600}"), 'canonical json: astral plane escapes as a surrogate pair');
+
+$t->section('error hook edges');
+
+$hookErrors = [];
+$hookLogger = new CaptureLogger();
+$hookCalls = [];
+ErrorHook::fire(
+    static function (string $stage, Throwable $error, array $context) use (&$hookCalls): void {
+        $hookCalls[] = [$stage, $error->getMessage(), $context];
+    },
+    $hookLogger,
+    'transport_send',
+    new RuntimeException('upstream down'),
+    ['endpoint' => 'https://x']
+);
+$t->same(1, count($hookCalls), 'error hook invoked with stage, error, and context');
+$t->same('transport_send', $hookCalls[0][0], 'error hook receives the stage');
+$t->same([], $hookLogger->errors, 'a healthy hook logs nothing');
+ErrorHook::fire(
+    static fn (): never => throw new LogicException('hook exploded'),
+    $hookLogger,
+    'flush_events',
+    new RuntimeException('upstream down'),
+    []
+);
+$t->same(1, count($hookLogger->errors), 'a throwing hook is caught and logged');
+$t->ok(str_contains($hookLogger->errors[0] ?? '', "onError hook raised while handling 'flush_events'"), 'throwing hook log names the stage');
+$t->same('RuntimeException: upstream down', ErrorHook::message(new RuntimeException('upstream down')), 'message formats Throwables');
+$t->same('plain string', ErrorHook::message('plain string'), 'message passes unknown values through');
+
+$t->section('headers redactor edges');
+
+$t->same(
+    ['n' => null, 'i' => 3, 'f' => 1.5, 'b' => true],
+    HeadersRedactor::sanitize(['n' => null, 'i' => 3, 'f' => 1.5, 'b' => true], ['authorization']),
+    'scalars pass through sanitization untouched'
+);
+$when = new DateTimeImmutable('2026-01-02T03:04:05Z');
+$t->same($when, HeadersRedactor::sanitize($when, ['authorization']), 'DateTimeInterface values pass through untouched');
+$t->same(HeadersRedactor::REDACTED, HeadersRedactor::sanitize(new stdClass(), ['authorization']), 'plain objects are redacted wholesale');
+$t->same(HeadersRedactor::REDACTED, HeadersRedactor::sanitize(STDIN, ['authorization']), 'resources are redacted wholesale');
+$deep = ['authorization' => 'deep-secret'];
+for ($i = 0; $i < 12; $i++) {
+    $deep = ['w' => $deep];
+}
+$sanitizedDeep = HeadersRedactor::sanitize($deep, ['authorization']);
+for ($i = 0; $i < 11; $i++) {
+    $sanitizedDeep = $sanitizedDeep['w'];
+}
+$t->same(HeadersRedactor::REDACTED, $sanitizedDeep, 'nesting beyond the sanitize depth is redacted');
+$t->same('   ', HeadersRedactor::sanitize('   ', ['authorization']), 'whitespace-only strings are returned as-is');
+$t->same(HeadersRedactor::REDACTED, HeadersRedactor::sanitize('{"a":' . str_repeat('1', 9000) . '}', ['authorization']), 'json-looking strings above the scan cap are redacted');
+$t->same('{"bad json', HeadersRedactor::sanitize('{"bad json', ['authorization']), 'malformed json strings are returned as-is');
+
+$t->section('json helpers edges');
+
+$t->same(null, Json::decodeAnyOrNull('not json'), 'decodeAnyOrNull returns null on invalid JSON');
+$t->same(null, Json::decodeAnyOrNull('null'), 'decodeAnyOrNull disambiguates a literal null body');$t->section('rate limiter and circuit breaker edges');
+
+$freshLimiter = new RateLimiter(2, 60.0);
+$t->same(0.0, $freshLimiter->getRetryAfter(), 'retry-after is 0 with no recorded calls');
+$breaker = new CircuitBreaker(2, 60.0);
+$t->ok(!$breaker->isOpen(), 'a fresh breaker is not open');
+$t->ok((new CircuitBreaker(2, 0.0))->isOpen() === false, 'isOpen reflects the state field');
+
+$t->section('payload encryptor edges');
+
+$t->throws(EncryptionException::class, static fn () => new PayloadEncryptor('!!!not-base64!!!'), 'encryption: undecodable key format rejected');
+$t->throws(EncryptionException::class, static fn () => (new PayloadEncryptor($vectors[0]['key_b64']))->decrypt('AAA'), 'encryption: truncated payload rejected');
+$t->throws(EncryptionException::class, static fn () => (new PayloadEncryptor($vectors[0]['key_b64']))->encrypt(['r' => fopen('php://memory', 'rb')]), 'encryption: an unserializable payload raises the typed error');
+$t->throws(
+    EncryptionException::class,
+    static fn () => (new PayloadEncryptor($vectors[0]['key_b64']))->decrypt((new PayloadEncryptor($vectors[0]['key_b64']))->encrypt(['a', 'b'])),
+    'encryption: a list-shaped plaintext is rejected as tampered'
+);
+
+$t->section('buffer overflow policy parsing');
+
+$t->same(BufferOverflowPolicy::Block, BufferOverflowPolicy::tryFromValue(BufferOverflowPolicy::Block), 'policy instances pass through');
+$t->same(null, BufferOverflowPolicy::tryFromValue(5), 'non-string non-instance policies parse to null');
+
+$t->section('wire model edges');
+
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 42, 'timestamp' => WireFormat::now()]), 'event: non-string event_type rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'country' => 5]), 'event: non-string country rejected');
+$countryEvent = SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'country' => 'CN']);
+$t->same('CN', $countryEvent->country, 'event: string country kept');
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'status_code' => 2.5]), 'event: fractional status_code rejected');
+$statusCodeEvent = SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'status_code' => 200]);
+$t->same(200, $statusCodeEvent->statusCode, 'event: integer status_code kept');
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'response_time' => NAN]), 'event: NaN response_time rejected');
+$responseTimeEvent = SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'response_time' => 1.5]);
+$t->same(1.5, $responseTimeEvent->responseTime, 'event: float response_time kept');
+$stringNumberEvent = SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'response_time' => '0.5']);
+$t->same(0.5, $stringNumberEvent->responseTime, 'event: numeric-string response_time coerced');
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'response_time' => 'abc']), 'event: non-numeric response_time rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityEvent::normalize(['event_type' => 'x', 'timestamp' => WireFormat::now(), 'metadata' => 'junk']), 'event: non-array metadata rejected');
+
+$t->throws(InvalidEventException::class, static fn () => SecurityMetric::normalize('a string'), 'metric: non-array payload rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityMetric::normalize(['metric_type' => 'request_count', 'value' => 'abc']), 'metric: non-numeric value rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityMetric::normalize(['metric_type' => 'request_count', 'value' => NAN]), 'metric: NaN value rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityMetric::normalize(['metric_type' => 'request_count', 'value' => 1, 'endpoint' => 5, 'timestamp' => WireFormat::now()]), 'metric: non-string endpoint rejected');
+$t->throws(InvalidEventException::class, static fn () => SecurityMetric::normalize(['metric_type' => 'request_count', 'value' => 1, 'tags' => 'junk', 'timestamp' => WireFormat::now()]), 'metric: non-array tags rejected');
+$metricWithStringEndpoint = SecurityMetric::normalize(['metric_type' => 'request_count', 'value' => 1, 'endpoint' => '/api/x', 'timestamp' => WireFormat::now()]);
+$t->same('/api/x', $metricWithStringEndpoint->endpoint, 'metric: string endpoint kept');
+
+$directMetric = new SecurityMetric(WireFormat::now(), 'request_count', 2, null, ['n' => 3]);
+$agentForCoercion = makeAgent([], new RecordingTransport());
+$agentForCoercion->sendMetric($directMetric);
+[$flushedMetrics] = $agentForCoercion->buffer->flushMetricsWithKeys();
+$t->same(['n' => '3'], $flushedMetrics[0]->tags, 'sendMetric coerces non-string tag values at the redaction boundary');
+
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['rule_id' => 5]), 'rules: non-string rule_id rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['version' => 'abc']), 'rules: non-integer version rejected');
+$t->throws(InvalidRulesException::class, static fn () => DynamicRules::normalize(['auto_ban_threshold' => 'abc']), 'rules: non-numeric auto_ban_threshold rejected');
+$t->same(5, DynamicRules::normalize(['auto_ban_threshold' => 5])->autoBanThreshold, 'rules: a valid auto_ban_threshold parses');
+$rulesInstance = DynamicRules::normalize(['rule_id' => 'instance']);
+$t->same($rulesInstance, DynamicRules::normalize($rulesInstance), 'rules: instance passthrough');
+
+$wireNow = WireFormat::parseTimestamp(new DateTime('2026-01-02 03:04:05', new DateTimeZone('UTC')), 'ts');
+$t->same('2026-01-02T03:04:05+00:00', $wireNow->format(DATE_ATOM), 'wire: mutable DateTime inputs are converted to immutable');
+$t->ok(WireFormat::timestampOrDefault(null)->getTimestamp() > 1_500_000_000, 'wire: null timestamp defaults to now');
+$t->same(1_700_000_000, WireFormat::timestampOrDefault(1_700_000_000)->getTimestamp(), 'wire: epoch input parsed');
+
+$t->section('config resolver edges');
+
+$t->throws(ConfigException::class, static fn () => AgentConfigResolver::normalizeEndpoint('not a url', new SilentLogger()), 'endpoint without scheme and host rejected');
+$t->throws(ConfigException::class, static fn () => AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123', 'endpoint' => 123]), 'non-string endpoint rejected');
+$noLoggerConfig = AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123']);
+$t->ok($noLoggerConfig->logger instanceof \RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger, 'a non-logger input falls back to the default logger');
+$redisInstanceConfig = AgentConfigResolver::resolve([
+    'apiKey' => 'test-api-key-123',
+    'redis' => new \RenzoFranceschini\GuardAgent\Config\RedisConfig(url: 'redis://127.0.0.1:6379/0', commandTimeoutMs: 250.0),
+    'logger' => new SilentLogger(),
+]);
+$t->same(250.0, $redisInstanceConfig->redis?->commandTimeoutMs, 'a RedisConfig instance is accepted as-is');
+$coercedConfig = AgentConfigResolver::resolve([
+    'apiKey' => 'test-api-key-123',
+    'bufferSize' => '55',
+    'high_watermark_ratio' => '0.5',
+    'enable_metrics' => 0,
+    'sensitiveHeaders' => ['x-secret', 7],
+    'logger' => new SilentLogger(),
+]);
+$t->same(55, $coercedConfig->bufferSize, 'numeric-string bufferSize coerced');
+$t->same(0.5, $coercedConfig->highWatermarkRatio, 'numeric-string watermark coerced');
+$t->same(false, $coercedConfig->enableMetrics, 'integer-boolean enable_metrics coerced');
+$t->same(['x-secret', '7'], $coercedConfig->sensitiveHeaders, 'sensitive header lists coerce entries to strings');
+$t->throws(ConfigException::class, static fn () => makeConfig(['flushInterval' => 0]), 'flushInterval <= 0 rejected');
+$t->throws(ConfigException::class, static fn () => makeConfig(['timeout' => 0]), 'timeout <= 0 rejected');
+$t->throws(ConfigException::class, static fn () => makeConfig(['backoffFactor' => 0]), 'backoffFactor <= 0 rejected');
+$t->throws(ConfigException::class, static fn () => makeConfig(['maxConcurrentFlushes' => 0]), 'maxConcurrentFlushes below 1 rejected');
+$t->throws(ConfigException::class, static fn () => makeConfig(['compressionThreshold' => -1]), 'negative compressionThreshold rejected');
+$t->throws(
+    ConfigException::class,
+    static fn () => makeConfig(['redis' => ['url' => 'redis://127.0.0.1:6379/0', 'commandTimeoutMs' => 0]]),
+    'redis commandTimeoutMs <= 0 rejected'
+);
+$validatorTarget = new AgentConfig('short', 'ftp://bad.example');
+$t->ok(AgentConfigResolver::validate($validatorTarget) !== [], 'validate() flags a non-http endpoint directly');
+
+$t->section('install id filesystem edges');
+
+$realHome = getenv('HOME') ?: '';
+putenv('HOME');
+$homelessPath = InstallId::defaultPath();
+$t->ok(str_ends_with($homelessPath, '/.guard-agent/install-id'), 'default path falls back without HOME');
+putenv('HOME=' . $realHome);
+$unreadable = (string) tempnam(sys_get_temp_dir(), 'gaph-locked');
+chmod($unreadable, 0000);
+if (!is_readable($unreadable)) {
+    $logger = new CaptureLogger();
+    $generated = InstallId::resolve($unreadable, null, $logger);
+    $t->ok(Uuid::isUuid($generated), 'an unreadable install id file falls back to a fresh uuid');
+    $t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'install_id.read_failed')), 'read failures are warned about');
+    $t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'install_id.write_failed')), 'write failures are warned about');
+} else {
+    $t->skip('privileges bypass file permissions; unreadable fixture unavailable');
+}
+@unlink($unreadable);
+$logger = new CaptureLogger();
+$mkdirFailed = InstallId::resolve('/proc/self/environ/guard-agent-install', null, $logger);
+$t->ok(Uuid::isUuid($mkdirFailed), 'an unwritable directory still yields a fresh uuid');
+$t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'install_id.write_failed')), 'unwritable directories are warned about');
+
+$t->section('default logger');
+
+putenv('GUARD_AGENT_DEBUG');
+$quietLogger = new \RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger();
+$t->ok(true, 'default logger constructs with debug unset');
+putenv('GUARD_AGENT_DEBUG=1');
+$loudLogger = new \RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger();
+$loudLogger->debug('debug line');
+$loudLogger->info('info line');
+putenv('GUARD_AGENT_DEBUG');
+$warnLogger = new \RenzoFranceschini\GuardAgent\Log\DefaultAgentLogger();
+$warnLogger->warning('warning line');
+$warnLogger->error('error line');
+$t->ok(true, 'default logger writes all levels without raising');
+
+$t->section('redis handler edges');
+
+$fake = new FakeRedisClient();
+$handler = new RedisHandler($fake, 'gatest-edges', new SilentLogger());
+$handler->ping();
+$t->ok(true, 'redis handler pings through the client');
+$handler->setKey('agent_events', 'k', 'v', 60);
+$t->same(1, $handler->delete('agent_events', 'k'), 'redis handler deletes through the client');
+$deadHandler = new RedisHandler(new StreamRedisClient('redis://127.0.0.1:1/0', null, null, 0.2), 'gatest-edges', new SilentLogger());
+$t->same(0, $deadHandler->delete('agent_events', 'k'), 'delete failures return 0 and warn');
+$t->same([], $deadHandler->keys('agent_events:*'), 'keys failures return empty');
+$throwCloseHandler = new RedisHandler(new ThrowingCloseClient(), 'gatest-edges', new SilentLogger());
+$throwCloseHandler->close();
+$t->ok(true, 'redis handler close is best effort');
+
+$t->section('ext-redis adapter');
+
+if (!class_exists('Redis', false)) {
+    class_alias(ScriptedExtRedis::class, 'Redis');
+}
+$scriptedExt = new ScriptedExtRedis();
+$scriptedExt->getReplies = ['cached-value', false];
+$extClient = new ExtRedisClient($scriptedExt);
+$extClient->ping();
+$t->same('cached-value', $extClient->get('k'), 'ext adapter returns string values');
+$t->same(null, $extClient->get('missing'), 'ext adapter maps misses to null');
+$t->ok($extClient->set('k', 'v'), 'ext adapter sets without a ttl');
+$t->ok($extClient->set('k', 'v', 60), 'ext adapter sets with a ttl');
+$t->same(0, $extClient->delete(), 'ext adapter deletes nothing without keys');
+$t->same(2, $extClient->delete('a', 'b'), 'ext adapter deletes through the client');
+$scriptedExt->keysReplies = [['a', 'b']];
+$t->same(['a', 'b'], $extClient->keys('p:*'), 'ext adapter normalizes key lists');
+$scriptedExt->keysReplies = [false];
+$t->same([], $extClient->keys('p:*'), 'ext adapter maps non-array key replies to empty');
+$scriptedExt->closeThrows = true;
+$extClient->close();
+$t->ok(true, 'ext adapter close is best effort');
+$scriptedExt->setReply = false;
+$t->ok(!$extClient->set('k', 'v'), 'ext adapter propagates set failures');
+$scriptedExt->setReply = true;
+$scriptedExt->setexReply = false;
+$t->ok(!$extClient->set('k', 'v', 60), 'ext adapter propagates setex failures');
+
+$t->section('predis adapter');
+
+$t->throws(
+    \RenzoFranceschini\GuardAgent\Exception\RedisException::class,
+    static fn () => new PredisRedisClient(new stdClass()),
+    'predis adapter rejects objects without the client surface'
+);
+$predis = new PredisRedisClient(new ScriptedPredis());
+$predis->ping();
+$t->ok(true, 'predis adapter pings through the client');
+$scriptedPredis = new ScriptedPredis();
+$scriptedPredis->getReply = 'cached';
+$t->same('cached', (new PredisRedisClient($scriptedPredis))->get('k'), 'predis adapter returns string values');
+$scriptedPredis->getReply = false;
+$t->same(null, (new PredisRedisClient($scriptedPredis))->get('k'), 'predis adapter maps misses to null');
+$scriptedPredis->setReply = true;
+$t->ok((new PredisRedisClient($scriptedPredis))->set('k', 'v'), 'predis adapter sets without a ttl');
+$scriptedPredis->setexReply = false;
+$t->ok(!(new PredisRedisClient($scriptedPredis))->set('k', 'v', 60), 'predis adapter propagates setex failures');
+$t->same(0, (new PredisRedisClient($scriptedPredis))->delete(), 'predis adapter deletes nothing without keys');
+$t->same(1, (new PredisRedisClient($scriptedPredis))->delete('a'), 'predis adapter deletes through the client');
+$scriptedPredis->keysReply = ['a'];
+$t->same(['a'], (new PredisRedisClient($scriptedPredis))->keys('p:*'), 'predis adapter normalizes key lists');
+$scriptedPredis->keysReply = 'junk';
+$t->same([], (new PredisRedisClient($scriptedPredis))->keys('p:*'), 'predis adapter maps non-array key replies to empty');
+(new PredisRedisClient($scriptedPredis))->close();
+$t->ok(true, 'predis adapter closes through the client');
+
+$t->section('stream redis client against a scripted fake');
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['+NOPE']);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->ping();
+    $t->failed++;
+    echo "FAIL - an unexpected PING reply raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'Unexpected PING reply'), 'an unexpected PING reply raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis([':0']);
+$t->same([], (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->keys('*'), 'integer KEYS replies map to an empty list');
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['*-1']);
+$t->same([], (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->keys('*'), 'null KEYS replies map to an empty list');
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+$emptyDeleteStream = new StreamRedisClient('redis://127.0.0.1:1/0', null, null, 0.2);
+$t->same(0, $emptyDeleteStream->delete(), 'delete without keys is a zero no-op');
+
+$freshStream = new StreamRedisClient("redis://127.0.0.1:{$fakePort}");
+$freshStream->close();
+$t->ok(true, 'closing an unconnected stream client is a no-op');
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['+PONG']);
+$openStream = new StreamRedisClient("redis://127.0.0.1:{$fakePort}");
+$openStream->ping();
+$openStream->close();
+$t->ok(true, 'closing a connected stream client quits the socket');
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis([], 'halfclose');
+$halfClosed = new StreamRedisClient("redis://127.0.0.1:{$fakePort}", null, null, 1.0);
+try {
+    $halfClosed->ping();
+    $t->failed++;
+    echo "FAIL - a half-closed connection raises on read\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'redis read failed'), 'a half-closed connection raises on read');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['+nope']);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}", 'pass'))->ping();
+    $t->failed++;
+    echo "FAIL - a failed AUTH raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->same('redis AUTH failed', $error->getMessage(), 'a non-OK AUTH reply raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['+OK', '+nope']);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}", 'pass', 2))->ping();
+    $t->failed++;
+    echo "FAIL - a failed SELECT raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->same('redis SELECT 2 failed', $error->getMessage(), 'a non-OK SELECT reply raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['-ERR bad command']);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->ping();
+    $t->failed++;
+    echo "FAIL - an error reply raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->same('redis error reply: ERR bad command', $error->getMessage(), 'an -ERR reply raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['Xbogus']);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->ping();
+    $t->failed++;
+    echo "FAIL - a protocol violation raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'redis protocol error'), 'an unknown reply type raises a protocol error');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis([[ '$6', 'abc' ]]);
+try {
+    (new StreamRedisClient("redis://127.0.0.1:{$fakePort}"))->get('k');
+    $t->failed++;
+    echo "FAIL - a truncated bulk reply raises\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'bulk string truncated'), 'a truncated bulk reply raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis([], 'close');
+$closedPeer = new StreamRedisClient("redis://127.0.0.1:{$fakePort}", null, null, 1.0);
+try {
+    $closedPeer->ping();
+    $t->failed++;
+    echo "FAIL - a server that closes immediately raises on read\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'redis read failed') || str_contains($error->getMessage(), 'write failed'), 'an immediate server close raises');
+}
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis(['+PONG'], 'rst-after-reply');
+$rstStream = new StreamRedisClient("redis://127.0.0.1:{$fakePort}", null, null, 1.0);
+$rstStream->ping();
+usleep(300_000);
+$rstStream->close();
+$t->ok(true, 'closing a reset peer is a best-effort QUIT (the QUIT write failure is contained)');
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+[$fakeProc, $fakePort, $fakeControl] = startFakeRedis([], 'partial');
+$hungStream = new StreamRedisClient("redis://127.0.0.1:{$fakePort}", null, null, 0.3);
+$hungStart = microtime(true);
+try {
+    $hungStream->ping();
+    $t->failed++;
+    echo "FAIL - a hung server times out\n";
+} catch (\RenzoFranceschini\GuardAgent\Exception\RedisException $error) {
+    $t->ok(str_contains($error->getMessage(), 'timed out'), 'a hung server times out per the command timeout');
+}
+$t->ok(microtime(true) - $hungStart < 5.0, 'the command timeout bounds the wait');
+proc_terminate($fakeProc);
+proc_close($fakeProc);
+@unlink($fakeControl);
+
+$t->throws(
+    \RenzoFranceschini\GuardAgent\Exception\RedisException::class,
+    static fn () => new StreamRedisClient('localhost:6379'),
+    'a redis URL without scheme and host is rejected'
+);
+$t->throws(
+    \RenzoFranceschini\GuardAgent\Exception\RedisException::class,
+    static fn () => new StreamRedisClient('ftp://127.0.0.1:6379'),
+    'a non-redis scheme is rejected'
+);
+
 
 @unlink($controlFile);
 @unlink($stateFile);
+
+// =====================================================================
+// 13. Buffer persistence edges
+// =====================================================================
+$t->section('buffer persistence edges');
+
+// Persist failures through a throwing client hit the catch paths.
+$throwingBuffer = new EventBuffer(makeConfig());
+$throwingBuffer->initializeRedis(new RedisHandler(new ThrowingRedisClient(), 'gatest', new SilentLogger()));
+$throwingBuffer->addEvent(makeEvent(['event_type' => 'a']));
+$t->same(1, $throwingBuffer->getStats()['redisPersistFailures'], 'a throwing persist counts a failure (events)');
+$t->same('', $throwingBuffer->flushEventsWithKeys()[1][0], 'a throwing persist stores no key');
+$throwingBuffer->addMetric(makeMetric());
+$t->same(2, $throwingBuffer->getStats()['redisPersistFailures'], 'a throwing persist counts a failure (metrics)');
+
+// Persist rejections (SET not OK) count too.
+$rejectFake = new FakeRedisClient();
+$rejectFake->failWrites(true);
+$rejectBuffer = new EventBuffer(makeConfig());
+$rejectBuffer->initializeRedis(new RedisHandler($rejectFake, 'gatest', new SilentLogger()));
+$rejectBuffer->addMetric(makeMetric());
+$t->same(1, $rejectBuffer->getStats()['redisPersistFailures'], 'a rejected metric persist counts a failure');
+
+// Startup load: valid seeds, missing data, corrupt json, invalid payloads,
+// and eviction when the buffer is full during the load.
+$seedFake = new FakeRedisClient();
+$seedPrefix = 'gatest-seeds';
+$validEvent = Json::encode(makeEvent(['event_type' => 'seeded'])->toWire());
+$validMetric = Json::encode(makeMetric(['metric_type' => 'request_count', 'value' => 9])->toWire());
+$seedFake->set($seedPrefix . ':agent_events:event_good', $validEvent, 60);
+$seedFake->set($seedPrefix . ':agent_events:event_nodata', 'whatever', 60);
+$seedFake->set($seedPrefix . ':agent_events:event_corrupt', '{not json', 60);
+$seedFake->set($seedPrefix . ':agent_events:event_invalid', Json::encode(['unexpected' => true]), 60);
+$seedFake->set($seedPrefix . ':agent_metrics:metric_good', $validMetric, 60);
+$seedFake->set($seedPrefix . ':agent_metrics:metric_corrupt', '{not json', 60);
+$seedFake->set($seedPrefix . ':agent_metrics:metric_invalid', Json::encode(['unexpected' => true]), 60);
+$seededBuffer = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$seededBuffer->initializeRedis(new RedisHandler($seedFake, $seedPrefix, new SilentLogger()));
+$t->same(2, $seededBuffer->getBufferSize(), 'one event and one metric seeded from redis (invalid skipped)');
+[$seededEvents] = $seededBuffer->flushEventsWithKeys();
+$t->same(['seeded'], eventTypes($seededEvents), 'the valid seeded event loaded with its key');
+[$seededMetrics] = $seededBuffer->flushMetricsWithKeys();
+$t->same(9, $seededMetrics[0]->value, 'the valid seeded metric loaded');
+
+// A load-time full buffer evicts the oldest entry's key.
+$evictFake = new FakeRedisClient();
+$evictFake->set('gatest-evict:agent_events:event_first', Json::encode(makeEvent(['event_type' => 'first'])->toWire()), 60);
+$evictFake->set('gatest-evict:agent_events:event_second', Json::encode(makeEvent(['event_type' => 'second'])->toWire()), 60);
+$evictFake->set('gatest-evict:agent_metrics:metric_first', Json::encode(makeMetric(['value' => 1])->toWire()), 60);
+$evictFake->set('gatest-evict:agent_metrics:metric_second', Json::encode(makeMetric(['value' => 2])->toWire()), 60);
+$evictBuffer = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$evictBuffer->initializeRedis(new RedisHandler($evictFake, 'gatest-evict', new SilentLogger()));
+$t->same(4, $evictBuffer->getBufferSize(), 'load-time overflow forgets keys but retains the items in memory');
+[$evictedEvents, $evictedEventKeys] = $evictBuffer->flushEventsWithKeys();
+$t->same(['first', 'second'], eventTypes($evictedEvents), 'both seeded events loaded');
+$t->same('', $evictedEventKeys[0], 'the overflowed seed lost its persistence key');
+$t->ok($evictedEventKeys[1] !== '', 'the newest seed keeps its key');
+
+// Keys listed in redis whose values vanished before the reload.
+$keysOnly = new KeysOnlyRedisClient();
+$keysOnly->listed = ['gatest-keys:agent_events:event_ghost', 'gatest-keys:agent_metrics:metric_ghost'];
+$ghostBuffer = new EventBuffer(makeConfig());
+$ghostBuffer->initializeRedis(new RedisHandler($keysOnly, 'gatest-keys', new SilentLogger()));
+$t->same(0, $ghostBuffer->getBufferSize(), 'vanished records are skipped with a warning');
+
+// Metric overflow under drop policy without redis (no keys to forget).
+$keylessMetricDrop = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$keylessMetricDrop->addMetric(makeMetric(['value' => 1]));
+$keylessMetricDrop->addMetric(makeMetric(['value' => 2]));
+$t->same(1, $keylessMetricDrop->getBufferSize(), 'drop policy evicted the keyless oldest metric');
+
+// Metric requeue eviction with persisted keys returns those keys.
+$keyedRequeueFake = new FakeRedisClient();
+$keyedBuffer = new EventBuffer(makeConfig(['bufferSize' => 2]));
+$keyedBuffer->initializeRedis(new RedisHandler($keyedRequeueFake, 'gatest-keyed', new SilentLogger()));
+$keyedBuffer->addMetric(makeMetric(['value' => 1]));
+$keyedBuffer->addMetric(makeMetric(['value' => 2]));
+[$keyedMetrics, $keyedKeys] = $keyedBuffer->flushMetricsWithKeys();
+$requeueMetricEvicted = $keyedBuffer->requeueMetricsInMemory(
+    [makeMetric(['value' => 4]), makeMetric(['value' => 3]), $keyedMetrics[1], $keyedMetrics[0]],
+    ['', '', $keyedKeys[1], $keyedKeys[0]]
+);
+$t->ok($requeueMetricEvicted !== [], 'requeue eviction returns the evicted metric keys');
+$t->same(2, $keyedBuffer->getBufferSize(), 'the metric requeue stayed within the buffer');
+
+// Persist failures through a batch carrying unencodable payloads.
+$utf8Fake = new FakeRedisClient();
+$utf8Buffer = new EventBuffer(makeConfig());
+$utf8Buffer->initializeRedis(new RedisHandler($utf8Fake, 'gatest-utf8', new SilentLogger()));
+$utf8Buffer->addEvent(makeEvent(['metadata' => ['bad' => "\xB1\x31"]]));
+$t->same(1, $utf8Buffer->getStats()['redisPersistFailures'], 'an unencodable event payload counts a persist failure');
+$utf8Buffer->addMetric(makeMetric(['tags' => ['bad' => "\xB1\x31"]]));
+$t->same(2, $utf8Buffer->getStats()['redisPersistFailures'], 'an unencodable metric payload counts a persist failure');
+
+// Confirm paths without a handler and with delete failures.
+$keylessBuffer = new EventBuffer(makeConfig());
+$keylessBuffer->confirmEventRedisKeys(['k1', '', null]);
+$keylessBuffer->confirmMetricRedisKeys(['k1', '', null]);
+$t->ok(true, 'confirm calls are no-ops without a redis handler');
+$throwingConfirm = new EventBuffer(makeConfig());
+$throwingConfirm->initializeRedis(new RedisHandler(new ThrowingRedisClient(), 'gatest', new SilentLogger()));
+$throwingConfirm->confirmEventRedisKeys(['k1']);
+$throwingConfirm->confirmMetricRedisKeys(['k1', '', null]);
+$t->ok(true, 'confirm failures are contained');
+
+// clearBuffer with a throwing client is contained.
+$throwingClear = new EventBuffer(makeConfig());
+$throwingClear->initializeRedis(new RedisHandler(new ThrowingRedisClient(), 'gatest', new SilentLogger()));
+$throwingClear->clearBuffer();
+$t->ok(true, 'clearBuffer failures are contained');
+
+// Requeue with null entries and keyless items.
+$requeueBuffer = new EventBuffer(makeConfig(['bufferSize' => 2]));
+$residentA = makeEvent(['event_type' => 'a']);
+$residentB = makeEvent(['event_type' => 'b']);
+$requeueBuffer->requeueEventsInMemory([$residentA, $residentB], ['', '']);
+$t->ok(true, 'requeue accepts keyless items');
+$requeueBuffer->requeueEventsInMemory([null], ['k']);
+$t->same(2, $requeueBuffer->getBufferSize(), 'null requeue entries are skipped');
+$requeueBuffer->requeueMetricsInMemory([null], ['k']);
+$requeueBuffer->requeueMetricsInMemory([makeMetric()], ['']);
+$t->same(3, $requeueBuffer->getBufferSize(), 'metric requeue accepts keyless items');
+
+// Requeue under pressure with keyless residents returns no keys.
+$pressureBuffer = new EventBuffer(makeConfig(['bufferSize' => 2]));
+$pressureBuffer->addEvent(makeEvent(['event_type' => 'r1']));
+$pressureBuffer->addEvent(makeEvent(['event_type' => 'r2']));
+$pressureEvicted = $pressureBuffer->requeueEventsInMemory([makeEvent(['event_type' => 'n1']), makeEvent(['event_type' => 'n2'])], ['', '']);
+$t->same([], $pressureEvicted, 'requeue eviction without keys returns nothing to confirm');
+$pressureBuffer->addMetric(makeMetric());
+$pressureBuffer->addMetric(makeMetric());
+$pressureMetricEvicted = $pressureBuffer->requeueMetricsInMemory([makeMetric(), makeMetric()], ['', '']);
+$t->same([], $pressureMetricEvicted, 'metric requeue eviction without keys returns nothing');
+
+// Overflow policies through the metric side.
+$metricRaise = new EventBuffer(makeConfig(['bufferSize' => 1, 'bufferOverflowPolicy' => 'raise']));
+$metricRaise->addMetric(makeMetric());
+$t->throws(BufferFullException::class, static fn () => $metricRaise->addMetric(makeMetric()), 'raise policy throws for metrics');
+
+$metricBlock = new EventBuffer(makeConfig(['bufferSize' => 1, 'bufferOverflowPolicy' => 'block']));
+$metricBlock->addMetric(makeMetric());
+$metricDrains = 0;
+$metricBlock->drainCallback = function () use (&$metricDrains, $metricBlock): void {
+    $metricDrains++;
+    $metricBlock->flushMetricsWithKeys();
+};
+$metricBlock->addMetric(makeMetric());
+$t->ok($metricDrains >= 1, 'block policy drained inline for metrics');
+
+$dropFake = new FakeRedisClient();
+$metricDrop = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$metricDrop->initializeRedis(new RedisHandler($dropFake, 'gatest-drop', new SilentLogger()));
+$metricDrop->addMetric(makeMetric(['value' => 1]));
+$metricDrop->addMetric(makeMetric(['value' => 2]));
+$t->same(1, $metricDrop->getBufferSize(), 'drop policy evicted the oldest metric');
+
+$eventDrop = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$eventDrop->initializeRedis(new RedisHandler(new FakeRedisClient(), 'gatest-drop', new SilentLogger()));
+$eventDrop->addEvent(makeEvent(['event_type' => 'r1']));
+$eventDrop->addEvent(makeEvent(['event_type' => 'r2']));
+$t->same(1, $eventDrop->getBufferSize(), 'drop policy evicted the oldest event');
+
+// =====================================================================
+// 14. Transport edges against the mock ingestion API
+// =====================================================================
+$t->section('transport edges');
+
+$edgeOverrides = array_merge($baseOverrides, ['retryAttempts' => 1, 'backoffFactor' => 0.01, 'timeout' => 10]);
+
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$edgeTransport->initialize();
+$edgeTransport->initialize();
+$t->ok(true, 'transport initialization is idempotent');
+$edgeTransport->close();
+$t->ok($edgeTransport->getStats()['sessionClosed'], 'close marks the session closed');
+$t->same(true, $edgeTransport->sendEvents([]), 'sendEvents on an empty batch is a no-op success');
+$t->same(true, $edgeTransport->sendMetrics([]), 'sendMetrics on an empty batch is a no-op success');
+
+// 201 accepted; small 409 responses exhaust the retries and return false.
+flushState($stateFile);
+setScript($controlFile, ['events' => [201]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(true, $edgeTransport->sendEvents([makeEvent()]), 'a 201 counts as accepted');
+
+flushState($stateFile);
+setScript($controlFile, ['events' => [409, 409]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(false, $edgeTransport->sendEvents([makeEvent()]), 'an unclassified 4xx is a transient failure');
+$t->ok($edgeTransport->requestsFailed >= 1, 'the unclassified 4xx counted a failed request');
+
+// A malformed batch (non-SecurityEvent element) fails inside the send path
+// and is contained as a transient failure instead of crashing the caller.
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(false, $edgeTransport->sendEvents(['not-an-event']), 'a malformed event batch is a contained transient failure');
+$t->ok($edgeTransport->requestsFailed >= 1, 'the malformed event batch counted a failed request');
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(false, $edgeTransport->sendMetrics(['not-a-metric']), 'a malformed metric batch is a contained transient failure');
+
+// A 200 with an unparseable body is a partial failure, then the retry passes.
+flushState($stateFile);
+setScript($controlFile, ['events' => [['status' => 200, 'body' => ['__raw' => '{oops']]]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(true, $edgeTransport->sendEvents([makeEvent()]), 'an unparseable 200 body retries and succeeds');
+$t->same([200, 200], statuses(stateFor($stateFile, '/api/v1/events')), 'the unparseable 200 was retried once');
+
+// Serialization failure: invalid UTF-8 metadata aborts the POST, retains the
+// batch as a transient failure, and fires the onError hook.
+flushState($stateFile);
+$hookSeen = [];
+$edgeConfig = makeConfig(array_merge($edgeOverrides, [
+    'onError' => static function (string $stage, Throwable $error, array $context) use (&$hookSeen): void {
+        $hookSeen[] = [$stage, $error->getMessage(), $context];
+    },
+]));
+$edgeTransport = new HttpTransport($edgeConfig);
+$t->same(false, $edgeTransport->sendEvents([makeEvent(['metadata' => ['bad' => "\xB1\x31"]])]), 'an unserializable batch is a transient failure');
+$t->ok($hookSeen !== [] && $hookSeen[0][0] === 'transport_send', 'the onError hook fired for the serialization failure');
+
+// The wire batch carries the metadata/tags objects through makeRequest's
+// redaction pass (ingest-time redaction already ran inside the agent).
+flushState($stateFile);
+setScript($controlFile, [], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$edgeTransport->sendEvents([makeEvent(['metadata' => ['keep' => 'yes']])]);
+$edgeRecords = stateFor($stateFile, '/api/v1/events');
+$t->same('yes', $edgeRecords[0]['body_json']['events'][0]['metadata']['keep'] ?? null, 'event metadata rides the wire batch unchanged at the boundary');
+flushState($stateFile);
+$edgeTransport->sendMetrics([makeMetric(['tags' => ['route' => '/x']])]);
+$edgeRecords = stateFor($stateFile, '/api/v1/metrics');
+$t->same('/x', $edgeRecords[0]['body_json']['metrics'][0]['tags']['route'] ?? null, 'metric tags ride the wire batch unchanged at the boundary');
+
+// Metrics: 413 splits, 400 drops permanently.
+flushState($stateFile);
+setScript($controlFile, ['metrics' => [413, 200, 200]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(true, $edgeTransport->sendMetrics([makeMetric(['value' => 1]), makeMetric(['value' => 2]), makeMetric(['value' => 3])]), 'a metrics 413 splits into accepted halves');
+$t->same([413, 200, 200], statuses(stateFor($stateFile, '/api/v1/metrics')), 'the metrics 413 split was retried as two halves');
+
+flushState($stateFile);
+setScript($controlFile, ['metrics' => [400]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(true, $edgeTransport->sendMetrics([makeMetric()]), 'a permanently rejected metrics batch is dropped durably');
+$t->same([400], statuses(stateFor($stateFile, '/api/v1/metrics')), 'the metrics 400 was observed exactly once');
+
+// Status: a permanent 400 is contained (never retried, returns false).
+flushState($stateFile);
+setScript($controlFile, ['status' => [400]], $secret, true);
+$edgeTransport = new HttpTransport(makeConfig($edgeOverrides));
+$t->same(false, $edgeTransport->sendStatus(new AgentStatus(
+    timestamp: WireFormat::now(),
+    status: 'healthy',
+    uptime: 1.0,
+    eventsSent: 0,
+    eventsFailed: 0,
+    bufferSize: 0,
+    lastFlush: null,
+    errors: [],
+)), 'a permanent status rejection returns false without retries');
+$t->same([400], statuses(stateFor($stateFile, '/api/v1/status')), 'the status 400 was observed exactly once');
+
+// Local rate limiter: denied sends wait for the window instead of giving up.
+flushState($stateFile);
+setScript($controlFile, ['events' => [500, 200]], $secret, true);
+$limitedOverrides = array_merge($edgeOverrides, ['retryAttempts' => 3]);
+$limitedTransport = new HttpTransport(makeConfig($limitedOverrides));
+saturateRateLimiter(refl($limitedTransport, 'rateLimiter')->getValue($limitedTransport));
+$t->same(true, $limitedTransport->sendEvents([makeEvent()]), 'the local rate limiter waits and retries');
+$t->same([500, 200], statuses(stateFor($stateFile, '/api/v1/events')), 'the denied wait never reached the server');
+
+flushState($stateFile);
+setScript($controlFile, ['rules' => [500, ['status' => 200, 'body' => ['rule_id' => 'rl']]]]);
+$limitedRulesTransport = new HttpTransport(makeConfig($limitedOverrides));
+saturateRateLimiter(refl($limitedRulesTransport, 'rateLimiter')->getValue($limitedRulesTransport));
+$t->same('rl', $limitedRulesTransport->fetchDynamicRules()?->ruleId, 'the rules GET honors the local rate limiter');
+
+// An unencodable envelope aborts the encrypted POST and retains the batch.
+flushState($stateFile);
+$encBadVersion = new HttpTransport(makeConfig(array_merge($edgeOverrides, [
+    'projectEncryptionKey' => $vectors[0]['key_b64'],
+    'guardVersion' => "\xB1\x31",
+])));
+$t->same(false, $encBadVersion->sendEvents([makeEvent()]), 'an unencodable encrypted envelope is a transient failure');
+$t->same([], statuses(stateFor($stateFile, '/api/v1/events/encrypted')), 'the unencodable envelope never reached the server');
+
+// Encrypted batches compress and sign like plaintext ones.
+flushState($stateFile);
+$encEdge = new HttpTransport(makeConfig(array_merge($edgeOverrides, [
+    'projectEncryptionKey' => $vectors[0]['key_b64'],
+    'compressionThreshold' => 10,
+])));
+$encEdge->sendEvents([makeEvent()]);
+$encEdgeRecords = stateFor($stateFile, '/api/v1/events/encrypted');
+$t->same('gzip', $encEdgeRecords[0]['content_encoding'] ?? null, 'an encrypted batch above the threshold is gzipped');
+$t->ok($encEdge->getStats()['bytesSent'] > 0, 'encrypted sends account their bytes');
+
+proc_terminate($proc);
+proc_close($proc);
+
+// =====================================================================
+// 15. Agent lifecycle edges
+// =====================================================================
+$t->section('agent lifecycle edges');
+
+// enable_events / enable_metrics kill switches.
+$agent = makeAgent(['enableEvents' => false], new RecordingTransport());
+$agent->sendEvent(makeEvent());
+$t->same(0, $agent->buffer->getBufferSize(), 'enable_events=false drops events');
+$agent = makeAgent(['enableMetrics' => false], new RecordingTransport());
+$agent->sendMetric(makeMetric());
+$t->same(0, $agent->buffer->getBufferSize(), 'enable_metrics=false drops metrics');
+
+// Invalid metric input is contained.
+$agent = makeAgent([], new RecordingTransport());
+$agent->sendMetric('garbage');
+$t->same(0, $agent->buffer->getBufferSize(), 'an invalid metric is dropped, not buffered');
+
+// Block policy drains inline through the agent's own flushBuffer.
+$agent = makeAgent(['bufferSize' => 1, 'bufferOverflowPolicy' => 'block'], new RecordingTransport());
+$agent->sendEvent(makeEvent(['event_type' => 'a']));
+$agent->sendEvent(makeEvent(['event_type' => 'b']));
+[$blockedEvents] = $agent->buffer->flushEventsWithKeys();
+$t->same(['b'], eventTypes($blockedEvents), 'block policy admitted the new event after the inline drain');
+$t->same(1, $agent->eventsSent, 'the inline drain delivered the first event');
+
+// redisHandler getter.
+$fake = new FakeRedisClient();
+$agent = makeAgent([], new RecordingTransport());
+$t->same(null, $agent->redisHandler(), 'no redis handler before initialization');
+$agent->initializeRedis(new RedisHandler($fake, 'gatest', new SilentLogger()));
+$t->ok($agent->redisHandler() instanceof RedisHandler, 'redisHandler exposes the attached handler');
+
+// Failing flushes confirm evicted requeue keys so records never orphan.
+$fake = new FakeRedisClient();
+$transport = new RecordingTransport();
+$transport->eventOutcomes = [false];
+$agent = makeAgent(['bufferSize' => 1, 'flushInterval' => 30], $transport);
+$agent->initializeRedis(new RedisHandler($fake, 'gatest-evict', new SilentLogger()));
+$agent->sendEvent(makeEvent(['event_type' => 'a']));
+$agent->sendEvent(makeEvent(['event_type' => 'b']));
+$agent->flushBuffer();
+$t->same(1, count($fake->storage), 'a failed flush confirms the evicted key and retains the rest');
+
+// Metrics mirror the same eviction-confirm path.
+$fake = new FakeRedisClient();
+$transport = new RecordingTransport();
+$transport->metricOutcomes = [false];
+$agent = makeAgent(['bufferSize' => 1, 'flushInterval' => 30], $transport);
+$agent->initializeRedis(new RedisHandler($fake, 'gatest-evict', new SilentLogger()));
+$agent->sendMetric(makeMetric());
+$agent->sendMetric(makeMetric());
+$agent->flushBuffer();
+$t->same(1, count($fake->storage), 'a failed metric flush confirms the evicted key and retains the rest');
+
+// A load-time overflow (more seeds than the buffer holds) requeues a batch
+// larger than the buffer: the tail evictions are confirmed away.
+$overflowFake = new FakeRedisClient();
+$overflowPrefix = 'gatest-overflow';
+foreach (['o1', 'o2', 'o3'] as $seedType) {
+    $overflowFake->set(
+        $overflowPrefix . ':agent_events:event_' . $seedType,
+        Json::encode(makeEvent(['event_type' => $seedType])->toWire()),
+        60
+    );
+    $overflowFake->set(
+        $overflowPrefix . ':agent_metrics:metric_' . $seedType,
+        Json::encode(makeMetric(['value' => 1])->toWire()),
+        60
+    );
+}
+$overflowTransport = new RecordingTransport();
+$overflowTransport->eventOutcomes = [false];
+$overflowTransport->metricOutcomes = [false];
+$overflowAgent = makeAgent(['bufferSize' => 1, 'flushInterval' => 30], $overflowTransport);
+$overflowAgent->initializeRedis(new RedisHandler($overflowFake, $overflowPrefix, new SilentLogger()));
+$t->same(6, $overflowAgent->buffer->getBufferSize(), 'the overflowed reload holds every seed in memory');
+$overflowAgent->flushBuffer();
+$t->ok($overflowAgent->buffer->getBufferSize() >= 1, 'the overflowed requeue stayed populated');
+
+// The per-kind retry gate skips the metrics loop too.
+$transport = new RecordingTransport();
+$transport->metricOutcomes = [false];
+$agent = makeAgent(['flushInterval' => 30], $transport);
+$agent->sendMetric(makeMetric());
+$agent->flushBuffer();
+refl($agent, 'metricsRetryAfter')->setValue($agent, microtime(true) + 60.0);
+$agent->flushBuffer();
+$t->same(0, $agent->metricsSent, 'the metrics gate skips the immediate retry');
+refl($agent, 'metricsRetryAfter')->setValue($agent, 0.0);
+$agent->flushBuffer();
+$t->same(1, $agent->metricsSent, 'the metrics retry delivers after the gate');
+
+// A throwing metrics transport requeues and counts a loop failure.
+$logger = new CaptureLogger();
+$transport = new RecordingTransport();
+$transport->metricOutcomes = [new RuntimeException('metrics down')];
+$agent = makeAgent(['flushInterval' => 30, 'logger' => $logger], $transport);
+$agent->sendMetric(makeMetric());
+$agent->flushBuffer();
+$t->same(1, $agent->buffer->getBufferSize(), 'a throwing metrics transport requeues');
+$t->same(1, $agent->getStats()['loopFailures']['flush'], 'the throw counted as a flush loop failure');
+$t->ok((bool) array_filter($logger->errors, static fn (string $e): bool => str_contains($e, 'Transport raised sending metrics')), 'the transport raise was logged');
+
+// Metrics flush recovery warning after a failure streak.
+$logger = new CaptureLogger();
+$transport = new RecordingTransport();
+$transport->metricOutcomes = [false, true];
+$agent = makeAgent(['flushInterval' => 30, 'logger' => $logger], $transport);
+$agent->sendMetric(makeMetric());
+$agent->flushBuffer();
+refl($agent, 'metricsRetryAfter')->setValue($agent, 0.0);
+$agent->flushBuffer();
+$t->same(1, $agent->metricsSent, 'the metrics flush recovered');
+$t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'Metrics flush recovered')), 'the recovery was announced');
+
+// Status loop failures are counted and logged.
+$logger = new CaptureLogger();
+$stub = new StubTransport();
+$stub->statusOutcome = false;
+$agent = makeAgent(['statusInterval' => 60, 'logger' => $logger], $stub);
+$agent->start();
+refl($agent, 'nextStatusPushAt')->setValue($agent, microtime(true) - 1.0);
+$agent->tick();
+$t->same(false, $agent->getStats()['lastStatusPushOk'], 'a false status push is recorded');
+$t->same(1, $agent->getStats()['loopFailures']['status'], 'the status failure streak counted');
+$stub->statusOutcome = new RuntimeException('status down');
+$agent->buffer->lastFlushTime = microtime(true);
+$agent->sendEvent(makeEvent());
+refl($agent, 'nextStatusPushAt')->setValue($agent, microtime(true) - 1.0);
+$agent->tick();
+$t->ok((bool) array_filter($logger->errors, static fn (string $e): bool => str_contains($e, 'Status push failed')), 'a throwing status push is contained and logged');
+
+// tick() contains even a hostile logger.
+$fickle = new FickleLogger();
+$stub = new StubTransport();
+$stub->statusOutcome = false;
+$agent = makeAgent(['statusInterval' => 60, 'logger' => $fickle], $stub);
+$agent->start();
+refl($agent, 'nextStatusPushAt')->setValue($agent, microtime(true) - 1.0);
+$t->ok(true, 'tick with a hostile logger');
+$threw = false;
+try {
+    $agent->tick();
+} catch (Throwable) {
+    $threw = true;
+}
+$t->ok(!$threw, 'tick never propagates a hostile logger failure');
+
+// flushIfNeeded throttles below the watermark and inside the interval.
+$stub = new StubTransport();
+$agent = makeAgent(['bufferSize' => 10, 'highWatermarkRatio' => 0.8, 'flushInterval' => 3600], $stub);
+$agent->sendEvent(makeEvent());
+$agent->buffer->lastFlushTime = microtime(true);
+$agent->flushIfNeeded();
+$t->same(0, count($stub->eventBatches), 'flushIfNeeded skips below the watermark inside the interval');
+
+// maxConcurrentFlushes gate.
+$stub = new StubTransport();
+$agent = makeAgent(['bufferSize' => 10, 'highWatermarkRatio' => 0.8, 'flushInterval' => 3600], $stub);
+$agent->sendEvent(makeEvent());
+$agent->buffer->lastFlushTime = microtime(true) - 7200.0;
+refl($agent, 'inFlightFlushes')->setValue($agent, $agent->config->maxConcurrentFlushes);
+$agent->flushIfNeeded();
+$t->same(0, count($stub->eventBatches), 'flushIfNeeded respects the concurrency cap');
+refl($agent, 'inFlightFlushes')->setValue($agent, 0);
+$agent->flushIfNeeded();
+$t->same(1, count($stub->eventBatches), 'flushIfNeeded runs under the cap');
+
+// Status degradation for an open circuit breaker.
+$stub = new StubTransport();
+$stub->breakerState = 'OPEN';
+$agent = makeAgent([], $stub);
+$t->same('degraded', $agent->getStatus()->status, 'an open breaker reports degraded');
+$t->same(['Transport circuit breaker is open'], $agent->getStatus()->errors, 'the open breaker names the cause');
+$agent->start();
+$t->ok(!$agent->healthCheck(), 'health check fails on an open breaker');
+$stub->breakerState = 'CLOSED';
+$t->ok($agent->healthCheck(), 'health check passes again once the breaker closes');
+
+// Health check fails on a nearly full buffer and survives a stats blowup.
+$stub = new StubTransport();
+$agent = makeAgent(['bufferSize' => 4], $stub);
+for ($i = 0; $i < 4; $i++) {
+    $agent->sendEvent(makeEvent());
+}
+$agent->start();
+$t->ok(!$agent->healthCheck(), 'health check fails at the buffer limit');
+$stub->getStatsThrows = true;
+$t->ok(!$agent->healthCheck(), 'health check contains a stats failure');
+
+// start() failure path: contained, stopped, and rethrown.
+$stub = new StubTransport();
+$stub->initializeThrows = true;
+$agent = makeAgent(['flushInterval' => 30], $stub);
+$t->throws(RuntimeException::class, static fn () => $agent->start(), 'start rethrows a transport initialization failure');
+$t->ok(!$agent->isRunning(), 'a failed start leaves the agent stopped');
+
+// stop() contains transport close failures.
+$stub = new StubTransport();
+$stub->closeThrows = true;
+$agent = makeAgent([], $stub);
+$agent->start();
+$agent->stop();
+$t->ok(true, 'stop contains transport close failures');
+$agent->close();
+$t->ok(true, 'close aliases stop');
+
+// Owned redis handlers are released on stop; a failed connection degrades.
+$agent = new GuardAgent(makeConfig(['redis' => ['url' => $redisUrl]]));
+$agent->start();
+$ownedHandler = $agent->redisHandler();
+$t->ok($ownedHandler instanceof RedisHandler, 'config redis attaches a handler on start');
+$agent->stop();
+$t->same(null, $agent->redisHandler(), 'stop releases the owned handler');
+
+$logger = new CaptureLogger();
+$agent = new GuardAgent(makeConfig(['redis' => ['url' => 'redis://127.0.0.1:1/0'], 'logger' => $logger]));
+$agent->start();
+$t->same(null, $agent->redisHandler(), 'an unreachable config redis degrades to memory-only');
+$t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'Redis persistence disabled')), 'the degraded connection is announced');
+$agent->stop();
 
 $t->finish();
