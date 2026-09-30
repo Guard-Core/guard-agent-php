@@ -1,3 +1,6 @@
 vendor/
 site/
 .DS_Store
+
+# coverage-runner artifact
+coverage.php
