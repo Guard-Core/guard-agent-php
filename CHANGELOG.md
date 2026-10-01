@@ -1,5 +1,32 @@
 # Release Notes
 
+v3.2.0 (2026-10-01)
+-------------------
+
+The hardening release: full reachable-line coverage, scaffold baseline, and the 4.3.0 train artifact (v3.2.0)
+--------------------------------------------------------------------------------------------------------------
+
+### About this release
+
+- **A maintenance release for the Guard 4.3.0 train.** There are no runtime behavior changes in this version: `src/` has a zero diff since 3.1.0. The release exists so consumers on the Guard 4.3.0 train pick up the hardened test suite and the repo governance baseline in a tagged, Packagist-published agent artifact.
+
+### Changed (3.1.0 -> 3.2.0)
+
+- **Repo scaffold baseline.** Adopted the guard-core process baseline: issue templates, pull request template, `FUNDING.yml`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, and the greetings workflow.
+- **CI hardening.** A Semgrep security-audit and secrets gate joins the workflow set, and a hard 100 percent reachable-line coverage gate is enforced through a dedicated coverage runner (`.github/coverage-runner.php`), with the unreachable-line waiver shrunk to the provably impossible set.
+- **Dev-only tooling.** `phpunit/php-code-coverage` `^11.0` is added as a dev dependency to measure the coverage gate. Runtime requirements are unchanged: the agent still declares no composer dependency beyond PHP extensions.
+- **The reported agent version is now 3.2.0** (`RenzoFranceschini\GuardAgent\Version::VERSION`), matching this git tag; composer.json carries no version field, Packagist derives it from the tag.
+
+### Testing
+
+- **The suite (`bin/test_agent.php`) was extended to full reachable-line coverage and gated at 100 percent.** Previously uncovered defensive arms are driven through namespace shadows (`tests/namespace_shadows.php`), the scripted phpredis double is kept signature-compatible, the ext-redis adapter is exercised over the real extension, and the Redis suites are now environment independent (`tests/fake_redis_server.php` plus the `REDIS_HOST` toggle), so CI no longer depends on host-specific Redis state.
+
+### Compatibility
+
+- **No composer dependency on guard-core-php.** The agent talks to the guard-core-app ingestion API over HTTP and intentionally declares no dependency on the engine (`rennf93/guard-core-php` appears in neither `require` nor `suggest`), so no composer-level guard-core-php floor applies to this package; it stays installable alongside any core version, including 4.3.0. The `guard-core-php` `^4.3.0` floor ships with the adapters that embed the engine (laravel-guard, symfony-guard, slim-guard, psr15-guard), so consumers on the 4.3.0 train resolve against the new engine and embed this agent for telemetry.
+
+___
+
 v3.1.0 (2026-09-27)
 -------------------
 
