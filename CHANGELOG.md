@@ -1,5 +1,25 @@
 # Release Notes
 
+v3.2.1 (2026-10-07)
+-------------------
+
+The family lockstep artifact: the 3.2.1 wave tag (v3.2.1)
+----------------------------------------------------------
+
+### About this release
+
+- **An empty lockstep release for the Guard agent family 3.2.1 wave.** No shipped change: `src/` has a zero diff since 3.2.0 apart from the version constant. The tag exists so the family stays version-aligned while the TypeScript port ships the wave's only runtime fix (the js/polynomial-redos endpoint normalization hardening, guard-agent-ts 3.2.1).
+
+### Changed (3.2.0 -> 3.2.1)
+
+- **Version only.** The reported agent version is now 3.2.1 (`RenzoFranceschini\GuardAgent\Version::VERSION`), matching this git tag; composer.json carries no version field, Packagist derives it from the tag. No runtime requirements change.
+
+### Compatibility
+
+- **Drop-in.** Consumers on 3.2.0 can move to 3.2.1 with no code or config changes. Still no composer dependency on guard-core-php (unchanged), so no engine floor applies to this package.
+
+___
+
 v3.2.0 (2026-10-01)
 -------------------
 
