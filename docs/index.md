@@ -3,10 +3,10 @@
 `guard-agent-php` is the PHP telemetry agent of the Guard ecosystem. It
 buffers security events, metrics, and status reports produced by your
 application (typically through a guard-core adapter's block hooks) and ships
-them to the [guard-core-app](https://github.com/rennf93/guard-core-app)
+them to the [guard-core-app](https://github.com/Guard-Core/guard-core-app)
 ingestion API with at-least-once delivery.
 
-It is a port of the normative [guard-agent](https://github.com/rennf93/guard-agent)
+It is a port of the normative [guard-agent](https://github.com/Guard-Core/guard-agent)
 (Python) semantics: per-kind buffers, overflow policies, retry with backoff,
 413 batch split-or-drop, Retry-After honoring, a circuit breaker, optional
 Redis-backed queue persistence, and a persisted install id. Unlike the
@@ -60,7 +60,7 @@ register_shutdown_function(static function () use ($agent): void {
 Most applications do not call the agent directly: the guard-core adapters
 expose a block hook (for example guard-core-php's `SecurityConfig(onBlock: ...)`)
 where the event construction belongs. See
-[examples/basic_usage](https://github.com/rennf93/guard-agent-php/tree/main/examples/basic_usage)
+[examples/basic_usage](https://github.com/Guard-Core/guard-agent-php/tree/main/examples/basic_usage)
 for the wiring shape.
 
 ## What the agent guarantees

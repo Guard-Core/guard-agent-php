@@ -1,10 +1,10 @@
 # guard-agent-php
 
-PHP telemetry agent for the [guard-core](https://github.com/rennf93/guard-core) ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.
+PHP telemetry agent for the [guard-core](https://github.com/Guard-Core/guard-core) ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.
 
-Docs: <https://rennf93.github.io/guard-agent-php/>
+Docs: <https://guard-core.github.io/guard-agent-php/>
 
-This completes the agent-per-language lineup: [guard-agent](https://github.com/rennf93/guard-agent) (Python), guardagent (TypeScript), guard-agent-rs (Rust), guard-agent-go (Go), and now guard-agent-php (PHP). Like the other ports it is a library, not a process: it never throws into the host request path, and every telemetry failure is a log line plus a counter bump.
+This completes the agent-per-language lineup: [guard-agent](https://github.com/Guard-Core/guard-agent) (Python), guardagent (TypeScript), guard-agent-rs (Rust), guard-agent-go (Go), and now guard-agent-php (PHP). Like the other ports it is a library, not a process: it never throws into the host request path, and every telemetry failure is a log line plus a counter bump.
 
 ## Install
 
@@ -101,9 +101,9 @@ With `redis` configured, every accepted item is written to Redis under a globall
 
 ## Related projects
 
-- [guard-core](https://github.com/rennf93/guard-core): the framework-agnostic engine library.
-- [guard-agent](https://github.com/rennf93/guard-agent) (Python), guardagent (TypeScript), guard-agent-rs (Rust), guard-agent-go (Go): sibling agents.
-- [guard-core-app](https://github.com/rennf93/guard-core-app): the SaaS platform this agent reports to.
+- [guard-core](https://github.com/Guard-Core/guard-core): the framework-agnostic engine library.
+- [guard-agent](https://github.com/Guard-Core/guard-agent) (Python), guardagent (TypeScript), guard-agent-rs (Rust), guard-agent-go (Go): sibling agents.
+- [guard-core-app](https://github.com/Guard-Core/guard-core-app): the SaaS platform this agent reports to.
 
 ## License
 

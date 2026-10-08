@@ -1,8 +1,8 @@
 site_name: guard-agent-php
 site_description: PHP telemetry agent reporting to the Guard Core App ingestion API
 site_author: Renn F
-repo_url: https://github.com/rennf93/guard-agent-php
-repo_name: rennf93/guard-agent-php
+repo_url: https://github.com/Guard-Core/guard-agent-php
+repo_name: Guard-Core/guard-agent-php
 
 theme:
   name: material
