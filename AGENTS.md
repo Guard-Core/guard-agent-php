@@ -3,7 +3,7 @@ Guidance for AI agents (including Claude Code) working in this repository.
 
 ## Project Overview
 
-rennf93/guard-agent-php (https://github.com/rennf93/guard-agent-php) is the PHP telemetry agent for the guard-core ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis for crash recovery) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.
+rennf93/guard-agent-php (https://github.com/Guard-Core/guard-agent-php) is the PHP telemetry agent for the guard-core ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis for crash recovery) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.
 
 - Composer package `rennf93/guard-agent-php`, type `library`, license MIT. No `version` field in composer.json (the laravel-guard/symfony-guard convention); versions come from git tags and are reported to the server as `agent_version` from `RenzoFranceschini\GuardAgent\Version::VERSION` (`0.1.0` at the time of writing). Shipped tags: none yet.
 - This package contains NO security logic. It reports what a host adapter already decided; detection, rate limiting, bans, and verdicts all live in guard-core (and guard-core-php).
@@ -140,9 +140,9 @@ Docker equivalents are in Quick Start. There is no Makefile (the sibling PHP rep
 
 ## Related Projects
 
-- guard-core (engine): https://github.com/rennf93/guard-core
-- guard-agent (Python, semantic reference): https://github.com/rennf93/guard-agent
-- guard-agent-go (Go port): https://github.com/rennf93/guard-agent-go
-- guardagent (TypeScript port): https://github.com/rennf93/guard-agent-ts
-- guard-core-php (PHP engine port): https://github.com/rennf93/guard-core-php
-- guard-core-app (SaaS ingestion API): https://github.com/rennf93/guard-core-app
+- guard-core (engine): https://github.com/Guard-Core/guard-core
+- guard-agent (Python, semantic reference): https://github.com/Guard-Core/guard-agent
+- guard-agent-go (Go port): https://github.com/Guard-Core/guard-agent-go
+- guardagent (TypeScript port): https://github.com/Guard-Core/guard-agent-ts
+- guard-core-php (PHP engine port): https://github.com/Guard-Core/guard-core-php
+- guard-core-app (SaaS ingestion API): https://github.com/Guard-Core/guard-core-app

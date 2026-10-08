@@ -1,10 +1,10 @@
 blank_issues_enabled: false
 contact_links:
   - name: Guard Agent PHP Documentation
-    url: https://rennf93.github.io/guard-agent-php/
+    url: https://guard-core.github.io/guard-agent-php/
     about: Check the documentation for usage information and tutorials
   - name: Usage Questions
-    url: https://github.com/rennf93/guard-agent-php/discussions
+    url: https://github.com/Guard-Core/guard-agent-php/discussions
     about: Please ask and answer questions in GitHub Discussions
   - name: Discord
     url: https://discord.gg/ZW7ZJbjMkK
