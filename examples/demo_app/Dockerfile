@@ -9,8 +9,12 @@ RUN composer install --no-interaction --no-progress
 
 FROM php:8.3-cli
 
-# The agent's transport speaks HTTPS to the ingestion API.
-RUN docker-php-ext-install curl && \
+# The agent's transport speaks HTTPS to the ingestion API; the curl
+# extension needs its libcurl dev headers to compile.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libcurl4-openssl-dev && \
+    docker-php-ext-install curl && \
+    rm -rf /var/lib/apt/lists/* && \
     useradd --create-home --uid 1000 guard
 
 COPY --from=build /app/vendor /app/vendor
