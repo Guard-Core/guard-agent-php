@@ -1,5 +1,25 @@
 # Release Notes
 
+v3.2.2 (2026-10-09)
+-------------------
+
+The Guard agent family 3.2.2 lockstep artifact (v3.2.2)
+-------------------------------------------------------
+
+### About this release
+
+- **The PHP port rides the 3.2.2 family wave in lockstep (guard-agent 3.2.2 on PyPI is the anchor).** The only content since 3.2.1 is the post-transfer metadata sweep (PR #18): no runtime change, `src/` has a zero diff.
+
+### Changed (3.2.1 -> 3.2.2)
+
+- **Post-transfer metadata sweep (PR #18).** Repo URLs (README, SECURITY, docs, AGENTS/CLAUDE cross-links) point at the Guard-Core org, the Pages host moves to guard-core.github.io, mkdocs repo_url/repo_name follow, FUNDING's github entry and the CODE_OF_CONDUCT enforcement contact move to the org, and a new `.github/CODEOWNERS` covers the tree. The reported agent version is now 3.2.2 (`RenzoFranceschini\GuardAgent\Version::VERSION`), matching this git tag; composer.json carries no version field, Packagist derives it from the tag. No runtime requirements change.
+
+### Compatibility
+
+- **Drop-in.** Consumers on 3.2.1 can move to 3.2.2 with no code or config changes. Still no composer dependency on guard-core-php (unchanged), so no engine floor applies to this package.
+
+___
+
 v3.2.1 (2026-10-07)
 -------------------
 
