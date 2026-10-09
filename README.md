@@ -1,10 +1,59 @@
-# guard-agent-php
+<p align="center">
+    <a href="https://guard-core.github.io/guard-core/latest/">
+        <img src="https://guard-core.github.io/guard-core/latest/assets/guard_core_legend.svg" alt="Guard Core">
+    </a>
+</p>
 
-PHP telemetry agent for the [guard-core](https://github.com/Guard-Core/guard-core) ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.
+___
 
-Docs: <https://guard-core.github.io/guard-agent-php/>
+<p align="center">
+    <strong>PHP telemetry agent for the [guard-core](https://github.com/Guard-Core/guard-core) ecosystem. It buffers security events, performance metrics, and agent status in memory (optionally persisted to Redis) and ships them to the Guard Core App ingestion API with at-least-once delivery semantics: nothing acknowledged is lost, nothing unacknowledged is forgotten.</strong>
+</p>
 
-This completes the agent-per-language lineup: [guard-agent](https://github.com/Guard-Core/guard-agent) (Python), guardagent (TypeScript), guard-agent-rs (Rust), guard-agent-go (Go), and now guard-agent-php (PHP). Like the other ports it is a library, not a process: it never throws into the host request path, and every telemetry failure is a log line plus a counter bump.
+<p align="center">
+    <a href="https://packagist.org/packages/rennf93/guard-agent-php">
+        <img src="https://img.shields.io/packagist/v/rennf93/guard-agent-php?color=0080ff" alt="Packagist version">
+    </a>
+    <a href="https://guard-core.github.io/guard-agent-php/latest/">
+        <img src="https://img.shields.io/badge/docs-latest-0080ff.svg" alt="Docs">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-agent-php/actions/workflows/release.yml">
+        <img src="https://github.com/Guard-Core/guard-agent-php/actions/workflows/release.yml/badge.svg" alt="Release">
+    </a>
+    <a href="https://opensource.org/licenses/MIT">
+        <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-agent-php/actions/workflows/ci.yml">
+        <img src="https://github.com/Guard-Core/guard-agent-php/actions/workflows/ci.yml/badge.svg" alt="CI">
+    </a>
+</p>
+
+<p align="center">
+    <a href="https://github.com/Guard-Core/guard-agent-php/actions/workflows/pages/pages-build-deployment">
+        <img src="https://github.com/Guard-Core/guard-agent-php/actions/workflows/pages/pages-build-deployment/badge.svg?branch=gh-pages" alt="PagesBuildDeployment">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-agent-php/actions/workflows/docs.yml">
+        <img src="https://github.com/Guard-Core/guard-agent-php/actions/workflows/docs.yml/badge.svg" alt="DocsUpdate">
+    </a>
+    <img src="https://img.shields.io/github/last-commit/Guard-Core/guard-agent-php?style=flat&amp;logo=git&amp;logoColor=white&amp;color=0080ff" alt="last-commit">
+</p>
+
+<p align="center">
+    <img src="https://img.shields.io/badge/PHP-777BB4.svg?style=flat&logo=php&logoColor=white" alt="PHP"> <img src="https://img.shields.io/badge/Redis-FF4438.svg?style=flat&logo=redis&logoColor=white" alt="Redis">
+    <a href="https://packagist.org/packages/rennf93/guard-agent-php">
+        <img src="https://img.shields.io/packagist/dm/rennf93/guard-agent-php" alt="Downloads">
+    </a>
+</p>
+
+<p align="center">
+    <a href="https://guard-core.com">Website</a> &middot;
+    <a href="https://guard-core.github.io/guard-agent-php/latest/">Docs</a> &middot;
+    <a href="https://playground.guard-core.com">Playground</a> &middot;
+    <a href="https://app.guard-core.com">Dashboard</a> &middot;
+    <a href="https://discord.gg/ZW7ZJbjMkK">Discord</a>
+</p>
+
+---
 
 ## Install
 
