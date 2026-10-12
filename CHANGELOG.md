@@ -8,6 +8,7 @@ User-Agent identifies the PHP agent (v3.2.3)
 
 ### Changed
 
+- When `guardCoreVersion` is not set, the agent fills it from Composer's runtime API if `rennf93/guard-core-php` is installed (leading `v` stripped); otherwise it stays null. A value set by the caller wins.
 - The ingestion `User-Agent` header is now `guard-agent-php/<version>` (was `guard-agent/<version>`, identical to the Python agent), so the Guard SaaS can tell the PHP agent apart from the Python one. Lockstep release with the agent family at 3.2.3.
 
 ___
