@@ -23,6 +23,25 @@ final class AgentConfigResolver
     {
     }
 
+    public static function installedGuardCoreVersion(string $package = 'rennf93/guard-core-php'): ?string
+    {
+        if (!class_exists(\Composer\InstalledVersions::class)
+            || !\Composer\InstalledVersions::isInstalled($package)) {
+            return null;
+        }
+
+        return self::bareVersion(\Composer\InstalledVersions::getPrettyVersion($package));
+    }
+
+    public static function bareVersion(?string $prettyVersion): ?string
+    {
+        if ($prettyVersion === null || $prettyVersion === '') {
+            return null;
+        }
+
+        return ltrim($prettyVersion, 'vV');
+    }
+
     /**
      * @param array<string, mixed> $input
      *
@@ -83,7 +102,8 @@ final class AgentConfigResolver
                 ?? AgentConfig::DEFAULT_SENSITIVE_HEADERS,
             maxPayloadSize: self::intInput($input, 'maxPayloadSize', 'max_payload_size', 1024),
             guardVersion: self::optionalStringInput($input, 'guardVersion', 'guard_version'),
-            guardCoreVersion: self::optionalStringInput($input, 'guardCoreVersion', 'guard_core_version'),
+            guardCoreVersion: self::optionalStringInput($input, 'guardCoreVersion', 'guard_core_version')
+                ?? self::installedGuardCoreVersion(),
             compressionEnabled: self::boolInput($input, 'compressionEnabled', 'compression_enabled', true),
             compressionThreshold: self::intInput($input, 'compressionThreshold', 'compression_threshold', 1024),
             installId: self::optionalStringInput($input, 'installId', 'install_id'),

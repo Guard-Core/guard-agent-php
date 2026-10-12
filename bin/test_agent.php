@@ -1010,6 +1010,14 @@ $t->same(true, refl($tlsParts, 'tls')->getValue($tlsParts), 'rediss scheme enabl
 // =====================================================================
 // 2. Wire models
 // =====================================================================
+$t->section('guard core version');
+$t->same('4.3.3', AgentConfigResolver::bareVersion('v4.3.3'), 'guard core version: leading v stripped');
+$rootPackage = \Composer\InstalledVersions::getRootPackage()['name'];
+$t->same(ltrim(\Composer\InstalledVersions::getPrettyVersion($rootPackage) ?? '', 'vV'), AgentConfigResolver::installedGuardCoreVersion($rootPackage), 'guard core version: an installed package resolves from Composer');
+$t->same(null, AgentConfigResolver::bareVersion(null), 'guard core version: null stays null');
+$t->same(null, AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123'])->guardCoreVersion, 'guard core version: null when guard-core-php is not installed');
+$t->same('9.9.9', AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123', 'guardCoreVersion' => '9.9.9'])->guardCoreVersion, 'guard core version: a user-set value wins');
+
 $t->section('models');
 
 $event = makeEvent([
@@ -1698,6 +1706,7 @@ $t->same('test-api-key-123', $record['x_api_key'] ?? null, 'smoke: X-API-Key hea
 $t->same('proj-smoke', $record['x_project_id'] ?? null, 'smoke: X-Project-Id header sent');
 $t->same('install-smoke-1', $record['x_agent_install_id'] ?? null, 'smoke: X-Agent-Install-Id header sent');
 $t->same(Version::USER_AGENT, $record['user_agent'] ?? null, 'smoke: User-Agent header sent');
+$t->same('guard-agent-php/' . Version::VERSION, $record['user_agent'] ?? null, 'smoke: User-Agent names the PHP port');
 
 // The mock runs with requireSigned=true, so a signature computed over the gzip
 // bytes would have been rejected with 401; 200 proves the HMAC covers the
