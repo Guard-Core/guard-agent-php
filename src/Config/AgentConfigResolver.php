@@ -23,14 +23,14 @@ final class AgentConfigResolver
     {
     }
 
-    public static function installedGuardCoreVersion(): ?string
+    public static function installedGuardCoreVersion(string $package = 'rennf93/guard-core-php'): ?string
     {
         if (!class_exists(\Composer\InstalledVersions::class)
-            || !\Composer\InstalledVersions::isInstalled('rennf93/guard-core-php')) {
+            || !\Composer\InstalledVersions::isInstalled($package)) {
             return null;
         }
 
-        return self::bareVersion(\Composer\InstalledVersions::getPrettyVersion('rennf93/guard-core-php'));
+        return self::bareVersion(\Composer\InstalledVersions::getPrettyVersion($package));
     }
 
     public static function bareVersion(?string $prettyVersion): ?string

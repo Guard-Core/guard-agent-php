@@ -1012,6 +1012,8 @@ $t->same(true, refl($tlsParts, 'tls')->getValue($tlsParts), 'rediss scheme enabl
 // =====================================================================
 $t->section('guard core version');
 $t->same('4.3.3', AgentConfigResolver::bareVersion('v4.3.3'), 'guard core version: leading v stripped');
+$rootPackage = \Composer\InstalledVersions::getRootPackage()['name'];
+$t->same(ltrim(\Composer\InstalledVersions::getPrettyVersion($rootPackage) ?? '', 'vV'), AgentConfigResolver::installedGuardCoreVersion($rootPackage), 'guard core version: an installed package resolves from Composer');
 $t->same(null, AgentConfigResolver::bareVersion(null), 'guard core version: null stays null');
 $t->same(null, AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123'])->guardCoreVersion, 'guard core version: null when guard-core-php is not installed');
 $t->same('9.9.9', AgentConfigResolver::resolve(['apiKey' => 'test-api-key-123', 'guardCoreVersion' => '9.9.9'])->guardCoreVersion, 'guard core version: a user-set value wins');
