@@ -1,5 +1,17 @@
 # Release Notes
 
+v3.2.3 (2026-10-12)
+-------------------
+
+User-Agent identifies the PHP agent (v3.2.3)
+--------------------------------------------
+
+### Changed
+
+- The ingestion `User-Agent` header is now `guard-agent-php/<version>` (was `guard-agent/<version>`, identical to the Python agent), so the Guard SaaS can tell the PHP agent apart from the Python one. Lockstep release with the agent family at 3.2.3.
+
+___
+
 v3.2.2 (2026-10-09)
 -------------------
 

@@ -1698,6 +1698,7 @@ $t->same('test-api-key-123', $record['x_api_key'] ?? null, 'smoke: X-API-Key hea
 $t->same('proj-smoke', $record['x_project_id'] ?? null, 'smoke: X-Project-Id header sent');
 $t->same('install-smoke-1', $record['x_agent_install_id'] ?? null, 'smoke: X-Agent-Install-Id header sent');
 $t->same(Version::USER_AGENT, $record['user_agent'] ?? null, 'smoke: User-Agent header sent');
+$t->same('guard-agent-php/' . Version::VERSION, $record['user_agent'] ?? null, 'smoke: User-Agent names the PHP port');
 
 // The mock runs with requireSigned=true, so a signature computed over the gzip
 // bytes would have been rejected with 401; 200 proves the HMAC covers the
