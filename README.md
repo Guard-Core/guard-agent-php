@@ -14,7 +14,7 @@ ___
     <a href="https://packagist.org/packages/rennf93/guard-agent-php">
         <img src="https://img.shields.io/packagist/v/rennf93/guard-agent-php?color=0080ff" alt="Packagist version">
     </a>
-    <a href="https://guard-core.github.io/guard-agent-php/latest/">
+    <a href="https://guard-core.github.io/guard-agent-php/">
         <img src="https://img.shields.io/badge/docs-latest-0080ff.svg" alt="Docs">
     </a>
     <a href="https://github.com/Guard-Core/guard-agent-php/actions/workflows/release.yml">
@@ -47,7 +47,7 @@ ___
 
 <p align="center">
     <a href="https://guard-core.com">Website</a> &middot;
-    <a href="https://guard-core.github.io/guard-agent-php/latest/">Docs</a> &middot;
+    <a href="https://guard-core.github.io/guard-agent-php/">Docs</a> &middot;
     <a href="https://playground.guard-core.com">Playground</a> &middot;
     <a href="https://app.guard-core.com">Dashboard</a> &middot;
     <a href="https://discord.gg/ZW7ZJbjMkK">Discord</a>
