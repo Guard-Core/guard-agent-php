@@ -316,6 +316,10 @@ final class GuardAgent
         $timeElapsed = $timeSinceLastFlush >= $this->config->flushInterval;
 
         if (!$atWatermark && !$timeElapsed) {
+            // Long-running workers: make buffered items durable between
+            // flushes, off the request path (a due flush persists at its end).
+            $this->buffer->persistPending();
+
             return;
         }
 
@@ -491,6 +495,9 @@ final class GuardAgent
             $this->flushEvents();
             $this->flushMetrics();
             $this->flushConsecutiveFailures = 0;
+            // Anything still buffered (requeued, gated by backoff, or added
+            // since) is made durable here, after the send, off the add path.
+            $this->buffer->persistPending();
         } catch (\Throwable $error) {
             // Mirror of the Python flush-loop catch: count consecutive loop
             // failures (the loop body itself is host-driven in this port).

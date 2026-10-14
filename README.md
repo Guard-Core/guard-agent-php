@@ -218,7 +218,7 @@ When `projectEncryptionKey` is set (a urlsafe-base64-encoded 256-bit key issued 
 
 ## Persistence
 
-With `redis` configured, every accepted item is written to Redis under a globally-unique key (`{prefix}:agent_events:event_<nanos>_<8hex>`, TTL 3600s) on enqueue; on `start()` the buffer reloads whatever a previous process left behind. Every Redis failure is fail-open: logged, counted, and after 3 consecutive write failures paused for a 30s cooldown, so an unhealthy Redis cannot tax the request path. The TTL is the backstop: at worst a lost confirmation duplicates a reload, it never loses data.
+With `redis` configured, every accepted item is written to Redis under a globally-unique key (`{prefix}:agent_events:event_<nanos>_<8hex>`, TTL 3600s) by `persistPending()`, which `flushBuffer()` runs after its send attempt (so delivered items are never written) and `flushIfNeeded()`/`tick()` run between flushes; adding an item never waits on Redis. A process that dies before the next flush or tick loses what was buffered since; on `start()` the buffer reloads whatever a previous process left behind. Every Redis failure is fail-open: logged, counted, and after 3 consecutive write failures paused for a 30s cooldown, so an unhealthy Redis cannot tax the request path. The TTL is the backstop: at worst a lost confirmation duplicates a reload, it never loses data.
 
 ## Documentation
 
