@@ -3385,6 +3385,16 @@ $buffer->addEvent(makeEvent(['event_type' => 'y']));
 $buffer->persistPending();
 $t->same([], $fake->storage, 'the cooldown still blocks writes after 3 consecutive failures');
 
+// The shutdown hook persists whatever is still pending (the process ended
+// before any flush or tick); bin/test_shutdown.php proves it end to end.
+$fake = new FakeRedisClient();
+$shutdownAgent = new GuardAgent(makeConfig(['installId' => 'install-shutdown']), new RecordingTransport());
+$shutdownAgent->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$shutdownAgent->sendEvent(makeEvent());
+$t->same([], $fake->storage, 'adding does not touch redis');
+$shutdownAgent->persistAtShutdown();
+$t->same(1, count($fake->storage), 'persistAtShutdown writes the pending event');
+
 // The startup encryption error includes the cause, still failing closed.
 $caught = null;
 try {

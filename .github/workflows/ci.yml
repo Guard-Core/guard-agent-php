@@ -55,6 +55,9 @@ jobs:
           REDIS_HOST: 127.0.0.1
         run: php bin/test_agent.php
 
+      - name: test_shutdown
+        run: php bin/test_shutdown.php
+
   composer-audit:
     name: Composer audit
     runs-on: ubuntu-latest

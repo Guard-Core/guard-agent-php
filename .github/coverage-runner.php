@@ -36,13 +36,15 @@ const UNREACHABLE_LINES = [
     // and degrade to a return value, so no Throwable can reach the buffer's
     // own catch arms.
     'src/EventBuffer/EventBuffer.php' => [198, 199, 307, 308, 325, 326, 641, 642],
-    // stop()'s close catch: GuardAgent::$redisHandler is the final
+    // persistAtShutdown()'s catch: persistPending() is total, every Redis
+    // call inside it is caught by RedisHandler (176-177). stop()'s close
+    // catch: GuardAgent::$redisHandler is the final
     // RedisHandler (initializeRedis hard-types it) whose close() catches
-    // every Throwable (252-253). asMetadataArray/asStringArray fallbacks:
+    // every Throwable (276-277). asMetadataArray/asStringArray fallbacks:
     // the inputs are SecurityEvent::$metadata / SecurityMetric::$tags array
     // properties passed through HeadersRedactor::sanitize, which returns an
-    // array for an array input at the top depth (778, 789).
-    'src/GuardAgent.php' => [252, 253, 785, 796],
+    // array for an array input at the top depth (809, 820).
+    'src/GuardAgent.php' => [176, 177, 276, 277, 809, 820],
     // read()/write() catch arms over @-suppressed filesystem calls, which
     // return false instead of throwing (76-77, 79, 95-96): is_file($path)
     // true implies a non-empty path, and the PHP 8 ValueErrors in this
