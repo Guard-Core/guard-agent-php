@@ -236,7 +236,7 @@ final class GuardAgent
 
             $this->running = true;
             $this->nextStatusPushAt = microtime(true) + $this->config->statusInterval;
-            $this->nextRulesRefreshAt = microtime(true) + $this->config->dynamicRuleInterval;
+            $this->nextRulesRefreshAt = $this->config->projectId === null || $this->config->projectId === '' ? null : microtime(true) + $this->config->dynamicRuleInterval; // rules refresh only with a project id (client.py:128-129)
 
             $this->logger->info('Guard Agent started successfully');
         } catch (\Throwable $error) {

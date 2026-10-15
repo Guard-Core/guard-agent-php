@@ -84,7 +84,8 @@ UNCOMPRESSED JSON body; the server verifies after decompression. Gzip
 ## Redis persistence
 
 With `redis` configured, every buffered item is persisted under
-`{keyPrefix}:{namespace}:{key}` (TTL 3600s) before the send attempt and
+`{keyPrefix}:{namespace}:{key}` (TTL 3600s) by `persistPending()` at flush, `tick()` or shutdown (never on
+add, a documented PHP deviation so a request never waits on Redis) and
 confirmed (deleted) on success, so a crash between buffer and network loses
 nothing; `start()` reloads what a previous process left behind. Every Redis
 failure is fail-open: logged, counted, and after 3 consecutive write
