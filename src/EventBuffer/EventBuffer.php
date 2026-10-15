@@ -680,6 +680,7 @@ final class EventBuffer
             'redisPersistFailures' => $this->redisPersistFailures,
             'durabilityDegraded' => $this->redisHandler !== null && $this->redisPersistFailures > 0,
             'lastFlushTime' => $this->lastFlushTime,
+            'autoFlushRunning' => false, // PHP has no background auto-flush (host-driven tick())
         ];
     }
 
@@ -688,12 +689,12 @@ final class EventBuffer
     // ------------------------------------------------------------------
 
     /**
-     * Globally-unique short persistence key: {kind}_{unix nanos}_{8 hex},
+     * Globally-unique short persistence key: {kind}_{wall-clock epoch nanos}_{8 hex},
      * mirroring guard_agent/_buffer_redis.py:47.
      */
     public static function uniqueKey(string $kind): string
     {
-        $nanos = (string) hrtime(true);
+        $nanos = ((int) (microtime(true) * 1_000_000)) . '000'; // wall-clock epoch ns like time.time_ns()
         $rand = substr(Uuid::hex(), 0, 8);
 
         return $kind . '_' . $nanos . '_' . $rand;

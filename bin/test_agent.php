@@ -3409,4 +3409,56 @@ $t->ok($caught !== null, 'invalid encryption key still fails startup');
 $t->ok($caught !== null && str_contains($caught->getMessage(), 'refusing plaintext fallback (cause: '), 'startup error message carries the cause');
 $t->ok($caught !== null && $caught->getPrevious() !== null && str_contains($caught->getMessage(), $caught->getPrevious()->getMessage()), 'cause text equals the chained exception message');
 
+// =====================================================================
+// Parity with the Python reference agent (guard-agent 3.2.4)
+// =====================================================================
+$t->section('reference parity');
+
+// The rules refresh only runs with a project id (client.py:128-129).
+foreach ([[null, 0], ['', 0], ['proj-1', 1]] as [$projectId, $expectedRules]) {
+    $parityTransport = new RecordingTransport();
+    $parityTransport->rulesOutcomes = [DynamicRules::normalize(['rule_id' => 'p', 'ttl' => 0])];
+    $parityAgent = makeAgent(['dynamicRuleInterval' => 60, 'projectId' => $projectId], $parityTransport);
+    $parityAgent->start();
+    if (refl($parityAgent, 'nextRulesRefreshAt')->getValue($parityAgent) !== null) {
+        refl($parityAgent, 'nextRulesRefreshAt')->setValue($parityAgent, microtime(true) - 1);
+    }
+    $parityAgent->tick();
+    $t->same($expectedRules, $parityTransport->rulesRequests, 'rules refresh requests with projectId ' . var_export($projectId, true));
+    $parityAgent->stop();
+}
+
+// Persistence keys carry wall-clock epoch nanoseconds like time.time_ns()
+// (_buffer_redis.py:54), not a monotonic clock.
+$fake = new FakeRedisClient();
+$parityAgent = makeAgent([], new RecordingTransport());
+$parityAgent->initializeRedis(new RedisHandler($fake, 'guard:agent:test:stamp', new SilentLogger()));
+$beforeNs = (int) (microtime(true) * 1_000_000) * 1000;
+$parityAgent->sendEvent(makeEvent());
+$parityAgent->buffer->persistPending();
+$afterNs = ((int) (microtime(true) * 1_000_000) + 1) * 1000;
+$stampKeys = $fake->keysContaining(':agent_events:event_');
+$t->same(1, count($stampKeys), 'stamp: one event key persisted');
+$stampOk = preg_match('/:event_(\d{19})_[0-9a-f]{8}$/', $stampKeys[0] ?? '', $stampMatch) === 1;
+$t->ok($stampOk, 'stamp: key is event_<19 digit ns>_<8 hex>');
+$t->ok($stampOk && (int) $stampMatch[1] >= $beforeNs && (int) $stampMatch[1] <= $afterNs, 'stamp: nanoseconds are wall-clock epoch');
+
+// getStats carries exactly the reference get_stats() key set, camelCased
+// (_client_status.py:70-89, buffer.py:57-74, _transport_lifecycle.py:128-137).
+$camel = static fn (string $key): string => lcfirst(str_replace('_', '', ucwords($key, '_')));
+$expectTop = ['running', 'uptime', 'events_sent', 'metrics_sent', 'events_failed', 'metrics_failed', 'rules_fetched', 'buffer_stats', 'transport_stats', 'cached_rules', 'rules_last_update', 'loop_failures', 'last_status_push_ok'];
+$expectBuffer = ['events_buffered', 'metrics_buffered', 'events_flushed', 'metrics_flushed', 'events_dropped', 'metrics_dropped', 'current_event_buffer_size', 'current_metric_buffer_size', 'redis_persist_failures', 'durability_degraded', 'last_flush_time', 'auto_flush_running'];
+$expectTransport = ['requests_sent', 'requests_failed', 'bytes_sent', 'circuit_breaker_state', 'failure_count', 'session_closed'];
+$sortedKeys = static function (array $keys): array {
+    sort($keys);
+
+    return $keys;
+};
+$statsAgent = makeAgent();
+$agentStats = $statsAgent->getStats();
+$t->same($sortedKeys(array_map($camel, $expectTop)), $sortedKeys(array_keys($agentStats)), 'stats: agent key set equals the reference');
+$t->same($sortedKeys(array_map($camel, $expectBuffer)), $sortedKeys(array_keys($agentStats['bufferStats'])), 'stats: buffer key set equals the reference');
+$t->same($sortedKeys(array_map($camel, $expectTransport)), $sortedKeys(array_keys((new HttpTransport(makeConfig()))->getStats())), 'stats: transport key set equals the reference');
+$t->same(['flush', 'rules', 'status'], $sortedKeys(array_keys($agentStats['loopFailures'])), 'stats: loop failure keys equal the reference');
+
 $t->finish();
