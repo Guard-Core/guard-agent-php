@@ -11,7 +11,7 @@ namespace RenzoFranceschini\GuardAgent;
  */
 final class Version
 {
-    public const VERSION = '3.2.3';
+    public const VERSION = '3.2.4';
 
     /** User-Agent value sent with every request (identifies the PHP port). */
     public const USER_AGENT = 'guard-agent-php/' . self::VERSION;

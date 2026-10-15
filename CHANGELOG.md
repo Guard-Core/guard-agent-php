@@ -1,5 +1,17 @@
 # Release Notes
 
+v3.2.4 (2026-10-15)
+-------------------
+
+Redis persistence off the request path (v3.2.4)
+-----------------------------------------------
+
+### Fixed
+
+- Buffered events and metrics are no longer persisted to Redis when they are added, which put a Redis round trip (up to the command timeout) on the request path. They are written at flush and `tick()`, and by a shutdown function registered once when Redis persistence is attached, so a normal end, `exit()`, an uncaught exception, a fatal error, out of memory and `max_execution_time` all persist. Only SIGKILL and SIGTERM without a host handler lose buffered events, because PHP runs no code then. The startup encryption error now includes its cause. Lockstep release with the agent family at 3.2.4.
+
+___
+
 v3.2.3 (2026-10-12)
 -------------------
 
