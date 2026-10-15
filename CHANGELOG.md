@@ -3,12 +3,15 @@
 v3.2.4 (2026-10-15)
 -------------------
 
-Redis persistence off the request path (v3.2.4)
------------------------------------------------
+Redis persistence off the request path and Python agent parity (v3.2.4)
+-----------------------------------------------------------------------
 
 ### Fixed
 
 - Buffered events and metrics are no longer persisted to Redis when they are added, which put a Redis round trip (up to the command timeout) on the request path. They are written at flush and `tick()`, and by a shutdown function registered once when Redis persistence is attached, so a normal end, `exit()`, an uncaught exception, a fatal error, out of memory and `max_execution_time` all persist. Only SIGKILL and SIGTERM without a host handler lose buffered events, because PHP runs no code then. The startup encryption error now includes its cause. Lockstep release with the agent family at 3.2.4.
+- `start()` schedules the rules refresh only when `projectId` is set (null or empty means none), like the Python agent.
+- Persistence keys use a wall-clock epoch nanosecond stamp at microsecond resolution, like `time.time_ns()` in the Python agent. Reload keeps the reference semantics: keys are walked in the order Redis returns them, with no sort.
+- `EventBuffer::getStats()` gains `autoFlushRunning` (always false, PHP has no background auto-flush), so the stats key set equals the reference set.
 
 ___
 
