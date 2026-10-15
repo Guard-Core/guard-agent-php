@@ -84,6 +84,8 @@ final class GuardAgent
 
     private bool $ownsRedisHandler = false;
 
+    private bool $shutdownRegistered = false;
+
     private int $inFlightFlushes = 0;
 
     public int $eventsSent = 0;
@@ -151,7 +153,29 @@ final class GuardAgent
         $this->redisHandler = $redisHandler;
         $this->ownsRedisHandler = false;
         $this->buffer->initializeRedis($redisHandler);
+        if (!$this->shutdownRegistered) {
+            $this->shutdownRegistered = true;
+            register_shutdown_function($this->persistAtShutdown(...));
+        }
         $this->logger->info('Redis integration initialized');
+    }
+
+    /**
+     * Last chance to make buffered items durable when the process ends before
+     * a flush or tick (normal end, exit(), uncaught exception, fatal error,
+     * out of memory, max_execution_time). It only writes Redis records, so
+     * it never sends and never throws. It does NOT call fastcgi_finish_request():
+     * that would cut off the output and shutdown functions the host registered
+     * after the agent, so hosts that want the response out first call it
+     * themselves. SIGKILL (and SIGTERM without a host handler) run no PHP code.
+     */
+    public function persistAtShutdown(): void
+    {
+        try {
+            $this->buffer->persistPending();
+        } catch (\Throwable $error) {
+            $this->logger->warning('shutdown persist failed: ' . ErrorHook::message($error));
+        }
     }
 
     public function redisHandler(): ?RedisHandler
@@ -316,6 +340,10 @@ final class GuardAgent
         $timeElapsed = $timeSinceLastFlush >= $this->config->flushInterval;
 
         if (!$atWatermark && !$timeElapsed) {
+            // Long-running workers: make buffered items durable between
+            // flushes, off the request path (a due flush persists at its end).
+            $this->buffer->persistPending();
+
             return;
         }
 
@@ -491,6 +519,9 @@ final class GuardAgent
             $this->flushEvents();
             $this->flushMetrics();
             $this->flushConsecutiveFailures = 0;
+            // Anything still buffered (requeued, gated by backoff, or added
+            // since) is made durable here, after the send, off the add path.
+            $this->buffer->persistPending();
         } catch (\Throwable $error) {
             // Mirror of the Python flush-loop catch: count consecutive loop
             // failures (the loop body itself is host-driven in this port).

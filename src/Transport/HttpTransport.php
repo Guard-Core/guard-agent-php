@@ -420,7 +420,10 @@ final class HttpTransport implements TransportInterface
         } catch (\Throwable $error) {
             $this->encryptor = null;
             $this->encryptionEnabled = false;
-            throw new EncryptionConfigException('Encryption round-trip failed at startup; refusing plaintext fallback', previous: $error);
+            throw new EncryptionConfigException(
+                'Encryption round-trip failed at startup; refusing plaintext fallback (cause: ' . $error->getMessage() . ')',
+                previous: $error
+            );
         }
     }
 

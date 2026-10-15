@@ -27,7 +27,7 @@ test:
 		echo "Running full suite with REDIS_HOST=$(REDIS_HOST)"; \
 	fi; \
 	if command -v php > /dev/null 2>&1; then \
-		REDIS_HOST="$(REDIS_HOST)" php $(RUNNER); \
+		REDIS_HOST="$(REDIS_HOST)" php $(RUNNER) && REDIS_HOST="$(REDIS_HOST)" php bin/test_shutdown.php; \
 	else \
 		echo "php not found locally, using $(PHP_IMAGE)"; \
 		docker run --rm -v "$$PWD":/app -w /app -e REDIS_HOST=$(REDIS_HOST) $(PHP_IMAGE) php $(RUNNER); \

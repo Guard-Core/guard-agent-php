@@ -65,6 +65,12 @@ final class EventBuffer
     /** SecurityMetric -> short Redis key ('' never stored). */
     private \SplObjectStorage $metricKeys;
 
+    /** Events accepted but not yet written to Redis (see persistPending). */
+    private \SplObjectStorage $pendingEventPersist;
+
+    /** Metrics accepted but not yet written to Redis (see persistPending). */
+    private \SplObjectStorage $pendingMetricPersist;
+
     private ?RedisHandler $redisHandler = null;
 
     private readonly int $maxSize;
@@ -98,6 +104,8 @@ final class EventBuffer
     {
         $this->eventKeys = new \SplObjectStorage();
         $this->metricKeys = new \SplObjectStorage();
+        $this->pendingEventPersist = new \SplObjectStorage();
+        $this->pendingMetricPersist = new \SplObjectStorage();
         $this->maxSize = $config->bufferSize;
         $this->logger = $config->logger ?? new DefaultAgentLogger();
     }
@@ -118,15 +126,12 @@ final class EventBuffer
         return $this->redisHandler;
     }
 
-    private function persistEventToRedis(SecurityEvent $event): ?string
+    private function persistEventToRedis(RedisHandler $redis, SecurityEvent $event): ?string
     {
-        if ($this->redisHandler === null) {
-            return null;
-        }
         try {
             $key = self::uniqueKey('event');
             $serialized = Json::encode($event->toWire());
-            if (!$this->redisHandler->setKey('agent_events', $key, $serialized, self::REDIS_PERSIST_TTL_SECONDS)) {
+            if (!$redis->setKey('agent_events', $key, $serialized, self::REDIS_PERSIST_TTL_SECONDS)) {
                 $this->redisPersistFailures++;
 
                 return null;
@@ -141,15 +146,12 @@ final class EventBuffer
         }
     }
 
-    private function persistMetricToRedis(SecurityMetric $metric): ?string
+    private function persistMetricToRedis(RedisHandler $redis, SecurityMetric $metric): ?string
     {
-        if ($this->redisHandler === null) {
-            return null;
-        }
         try {
             $key = self::uniqueKey('metric');
             $serialized = Json::encode($metric->toWire());
-            if (!$this->redisHandler->setKey('agent_metrics', $key, $serialized, self::REDIS_PERSIST_TTL_SECONDS)) {
+            if (!$redis->setKey('agent_metrics', $key, $serialized, self::REDIS_PERSIST_TTL_SECONDS)) {
                 $this->redisPersistFailures++;
 
                 return null;
@@ -256,6 +258,40 @@ final class EventBuffer
         }
     }
 
+    /**
+     * Write every buffered item that has no Redis record yet. Persistence is
+     * deliberately NOT done when an item is added: that put the request path
+     * behind a Redis round trip (up to the command timeout while Redis is
+     * slow). The host calls this off the hot path (GuardAgent::flushBuffer
+     * after the send attempt, so items that were just delivered are never
+     * written, and tick() between flushes). A failed write is counted and
+     * feeds the RedisHandler cooldown, exactly as before.
+     */
+    public function persistPending(): void
+    {
+        if ($this->redisHandler === null) {
+            return;
+        }
+        foreach ($this->events as $event) {
+            if (isset($this->pendingEventPersist[$event]) && !isset($this->eventKeys[$event])) {
+                $key = $this->persistEventToRedis($this->redisHandler, $event);
+                if ($key !== null) {
+                    $this->eventKeys[$event] = $key;
+                }
+            }
+        }
+        $this->pendingEventPersist->removeAll($this->pendingEventPersist);
+        foreach ($this->metrics as $metric) {
+            if (isset($this->pendingMetricPersist[$metric]) && !isset($this->metricKeys[$metric])) {
+                $key = $this->persistMetricToRedis($this->redisHandler, $metric);
+                if ($key !== null) {
+                    $this->metricKeys[$metric] = $key;
+                }
+            }
+        }
+        $this->pendingMetricPersist->removeAll($this->pendingMetricPersist);
+    }
+
     /** Delete the given event keys from Redis after the transport confirms. */
     public function confirmEventRedisKeys(array $keys): void
     {
@@ -309,6 +345,9 @@ final class EventBuffer
     private function forgetOldestEventKey(): ?string
     {
         $oldest = $this->events[0] ?? null;
+        if ($oldest !== null) {
+            unset($this->pendingEventPersist[$oldest]);
+        }
         if ($oldest === null || !isset($this->eventKeys[$oldest])) {
             return null;
         }
@@ -321,6 +360,9 @@ final class EventBuffer
     private function forgetOldestMetricKey(): ?string
     {
         $oldest = $this->metrics[0] ?? null;
+        if ($oldest !== null) {
+            unset($this->pendingMetricPersist[$oldest]);
+        }
         if ($oldest === null || !isset($this->metricKeys[$oldest])) {
             return null;
         }
@@ -333,6 +375,9 @@ final class EventBuffer
     private function forgetNewestEventKey(): ?string
     {
         $newest = $this->events === [] ? null : $this->events[count($this->events) - 1];
+        if ($newest !== null) {
+            unset($this->pendingEventPersist[$newest]);
+        }
         if ($newest === null || !isset($this->eventKeys[$newest])) {
             return null;
         }
@@ -345,6 +390,9 @@ final class EventBuffer
     private function forgetNewestMetricKey(): ?string
     {
         $newest = $this->metrics === [] ? null : $this->metrics[count($this->metrics) - 1];
+        if ($newest !== null) {
+            unset($this->pendingMetricPersist[$newest]);
+        }
         if ($newest === null || !isset($this->metricKeys[$newest])) {
             return null;
         }
@@ -367,15 +415,10 @@ final class EventBuffer
     {
         for (;;) {
             if (!$this->isEventBufferFull()) {
-                try {
-                    $this->events[] = $event;
-                    $this->eventsBuffered++;
-                    $key = $this->persistEventToRedis($event);
-                    if ($key !== null) {
-                        $this->eventKeys[$event] = $key;
-                    }
-                } catch (\Throwable $error) {
-                    $this->logger->error('Failed to buffer event: ' . ErrorHook::message($error));
+                $this->events[] = $event;
+                $this->eventsBuffered++;
+                if ($this->redisHandler !== null) {
+                    $this->pendingEventPersist[$event] = true;
                 }
                 break;
             }
@@ -415,15 +458,10 @@ final class EventBuffer
     {
         for (;;) {
             if (!$this->isMetricBufferFull()) {
-                try {
-                    $this->metrics[] = $metric;
-                    $this->metricsBuffered++;
-                    $key = $this->persistMetricToRedis($metric);
-                    if ($key !== null) {
-                        $this->metricKeys[$metric] = $key;
-                    }
-                } catch (\Throwable $error) {
-                    $this->logger->error('Failed to buffer metric: ' . ErrorHook::message($error));
+                $this->metrics[] = $metric;
+                $this->metricsBuffered++;
+                if ($this->redisHandler !== null) {
+                    $this->pendingMetricPersist[$metric] = true;
                 }
                 break;
             }
@@ -473,6 +511,7 @@ final class EventBuffer
         }, $events);
         $this->events = [];
         $this->eventKeys->removeAll($this->eventKeys);
+        $this->pendingEventPersist->removeAll($this->pendingEventPersist);
         $this->eventsFlushed += count($events);
         $this->lastFlushTime = microtime(true);
 
@@ -492,6 +531,7 @@ final class EventBuffer
         }, $metrics);
         $this->metrics = [];
         $this->metricKeys->removeAll($this->metricKeys);
+        $this->pendingMetricPersist->removeAll($this->pendingMetricPersist);
         $this->metricsFlushed += count($metrics);
         $this->lastFlushTime = microtime(true);
 
@@ -530,6 +570,8 @@ final class EventBuffer
             array_unshift($this->events, $event);
             if ($key !== '') {
                 $this->eventKeys[$event] = $key;
+            } elseif ($this->redisHandler !== null) {
+                $this->pendingEventPersist[$event] = true;
             }
         }
 
@@ -565,6 +607,8 @@ final class EventBuffer
             array_unshift($this->metrics, $metric);
             if ($key !== '') {
                 $this->metricKeys[$metric] = $key;
+            } elseif ($this->redisHandler !== null) {
+                $this->pendingMetricPersist[$metric] = true;
             }
         }
 
@@ -579,9 +623,11 @@ final class EventBuffer
     {
         $this->events = [];
         $this->eventKeys->removeAll($this->eventKeys);
+        $this->pendingEventPersist->removeAll($this->pendingEventPersist);
 
         $this->metrics = [];
         $this->metricKeys->removeAll($this->metricKeys);
+        $this->pendingMetricPersist->removeAll($this->pendingMetricPersist);
 
         if ($this->redisHandler !== null) {
             try {

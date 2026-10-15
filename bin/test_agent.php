@@ -1275,6 +1275,7 @@ $buffer = new EventBuffer(makeConfig(['bufferSize' => 3]));
 $buffer->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
 $resident = makeEvent(['event_type' => 'resident']);
 $buffer->addEvent($resident);
+$buffer->persistPending();
 [$drained, $residentKeys] = $buffer->flushEventsWithKeys();
 $t->same(1, count($fake->storage), 'enqueue persisted the resident event');
 $requeue = [
@@ -1295,6 +1296,8 @@ $buffer = new EventBuffer(makeConfig());
 $buffer->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
 $buffer->addEvent(makeEvent(['event_type' => 'a']));
 $buffer->addMetric(makeMetric());
+$buffer->persistPending();
+$t->ok($fake->storage !== [], 'clearBuffer precondition: records persisted');
 $buffer->clearBuffer();
 $t->same(0, $buffer->getBufferSize(), 'clearBuffer empties memory');
 $t->same([], $fake->storage, 'clearBuffer wipes persisted records');
@@ -1303,6 +1306,7 @@ $t->same([], $fake->storage, 'clearBuffer wipes persisted records');
 $buffer = new EventBuffer(makeConfig());
 $buffer->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
 $buffer->addMetric(makeMetric(['metric_type' => 'error_rate', 'value' => 0.25]));
+$buffer->persistPending();
 $metricKeys = $fake->keysContaining(':agent_metrics:metric_');
 $t->same(1, count($metricKeys), 'metric persisted under the agent_metrics namespace');
 $t->same(3600, $fake->ttls[$metricKeys[0]] ?? null, 'metric persistence TTL is 3600 seconds');
@@ -1562,6 +1566,7 @@ $transport = new RecordingTransport();
 $agent = makeAgent(['flushInterval' => 30], $transport);
 $agent->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
 $agent->sendEvent(makeEvent(['event_type' => 'a']));
+$agent->buffer->persistPending();
 $eventKeys = $fake->keysContaining(':agent_events:event_');
 $t->same(1, count($eventKeys), 'event persisted on enqueue');
 $t->ok(str_starts_with($eventKeys[0], $prefix . ':agent_events:event_'), 'persistence key is prefixed and globally unique');
@@ -1569,6 +1574,7 @@ $t->same(3600, $fake->ttls[$eventKeys[0]] ?? null, 'persistence TTL is 3600 seco
 
 $fake->failWrites(true);
 $agent->sendEvent(makeEvent(['event_type' => 'b']));
+$agent->buffer->persistPending();
 $t->same(1, $agent->buffer->getStats()['redisPersistFailures'], 'persist failure counted');
 $t->ok($agent->buffer->getStats()['durabilityDegraded'], 'durability reported degraded after a persist failure');
 $fake->failWrites(false);
@@ -1589,6 +1595,7 @@ $handler = new RedisHandler($fake, $prefix, new SilentLogger());
 $agentA = makeAgent(['flushInterval' => 30], new RecordingTransport());
 $agentA->initializeRedis($handler);
 $agentA->sendEvent(makeEvent(['event_type' => 'persisted']));
+$agentA->buffer->persistPending();
 $t->same(1, count($fake->storage), 'agent A persisted the event');
 $transportB = new RecordingTransport();
 $agentB = makeAgent(['flushInterval' => 30], $transportB);
@@ -1655,6 +1662,7 @@ if ($realClient !== null) {
     $agentA = new GuardAgent(makeConfig(['flushInterval' => 30, 'installId' => 'install-real']), $transportA);
     $agentA->initializeRedis(new RedisHandler($realClient, $namespace, new SilentLogger()));
     $agentA->sendEvent(makeEvent(['event_type' => 'durable']));
+    $agentA->buffer->persistPending();
     $t->same(1, count($realClient->keys($namespace . ':agent_events:*')), 'event persisted to the real redis on enqueue');
 
     $transportB = new RecordingTransport();
@@ -2725,9 +2733,11 @@ $t->section('buffer persistence edges');
 $throwingBuffer = new EventBuffer(makeConfig());
 $throwingBuffer->initializeRedis(new RedisHandler(new ThrowingRedisClient(), 'gatest', new SilentLogger()));
 $throwingBuffer->addEvent(makeEvent(['event_type' => 'a']));
+$throwingBuffer->persistPending();
 $t->same(1, $throwingBuffer->getStats()['redisPersistFailures'], 'a throwing persist counts a failure (events)');
 $t->same('', $throwingBuffer->flushEventsWithKeys()[1][0], 'a throwing persist stores no key');
 $throwingBuffer->addMetric(makeMetric());
+$throwingBuffer->persistPending();
 $t->same(2, $throwingBuffer->getStats()['redisPersistFailures'], 'a throwing persist counts a failure (metrics)');
 
 // Persist rejections (SET not OK) count too.
@@ -2736,6 +2746,7 @@ $rejectFake->failWrites(true);
 $rejectBuffer = new EventBuffer(makeConfig());
 $rejectBuffer->initializeRedis(new RedisHandler($rejectFake, 'gatest', new SilentLogger()));
 $rejectBuffer->addMetric(makeMetric());
+$rejectBuffer->persistPending();
 $t->same(1, $rejectBuffer->getStats()['redisPersistFailures'], 'a rejected metric persist counts a failure');
 
 // Startup load: valid seeds, missing data, corrupt json, invalid payloads,
@@ -2807,6 +2818,7 @@ $keyedBuffer = new EventBuffer(makeConfig(['bufferSize' => 2]));
 $keyedBuffer->initializeRedis(new RedisHandler($keyedRequeueFake, 'gatest-keyed', new SilentLogger()));
 $keyedBuffer->addMetric(makeMetric(['value' => 1]));
 $keyedBuffer->addMetric(makeMetric(['value' => 2]));
+$keyedBuffer->persistPending();
 [$keyedMetrics, $keyedKeys] = $keyedBuffer->flushMetricsWithKeys();
 $requeueMetricEvicted = $keyedBuffer->requeueMetricsInMemory(
     [makeMetric(['value' => 4]), makeMetric(['value' => 3]), $keyedMetrics[1], $keyedMetrics[0]],
@@ -2820,8 +2832,10 @@ $utf8Fake = new FakeRedisClient();
 $utf8Buffer = new EventBuffer(makeConfig());
 $utf8Buffer->initializeRedis(new RedisHandler($utf8Fake, 'gatest-utf8', new SilentLogger()));
 $utf8Buffer->addEvent(makeEvent(['metadata' => ['bad' => "\xB1\x31"]]));
+$utf8Buffer->persistPending();
 $t->same(1, $utf8Buffer->getStats()['redisPersistFailures'], 'an unencodable event payload counts a persist failure');
 $utf8Buffer->addMetric(makeMetric(['tags' => ['bad' => "\xB1\x31"]]));
+$utf8Buffer->persistPending();
 $t->same(2, $utf8Buffer->getStats()['redisPersistFailures'], 'an unencodable metric payload counts a persist failure');
 
 // Confirm paths without a handler and with delete failures.
@@ -3282,5 +3296,117 @@ $agent->start();
 $t->same(null, $agent->redisHandler(), 'an unreachable config redis degrades to memory-only');
 $t->ok((bool) array_filter($logger->warnings, static fn (string $w): bool => str_contains($w, 'Redis persistence disabled')), 'the degraded connection is announced');
 $agent->stop();
+
+// =====================================================================
+// Persistence off the request path
+// =====================================================================
+$t->section('persistence off the request path');
+
+$prefix = 'guard:agent:test:' . bin2hex(random_bytes(4));
+$fake = new FakeRedisClient();
+$transport = new RecordingTransport();
+$agent = makeAgent(['flushInterval' => 30], $transport);
+$agent->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$agent->sendEvent(makeEvent(['event_type' => 'a']));
+$agent->sendEvent(makeEvent(['event_type' => 'b']));
+$agent->sendMetric(makeMetric());
+$t->same([], $fake->storage, 'emitting events and metrics performs no Redis write');
+
+// Delivered items are never written: no orphaned keys.
+$agent->flushBuffer();
+$t->same(2, $agent->eventsSent, 'flush delivered the events');
+$t->same([], $fake->storage, 'items sent at the flush point leave no Redis keys');
+
+// Requeued items are persisted after the failed send and keep their keys.
+$transport->eventOutcomes = [false, true];
+$agent->sendEvent(makeEvent(['event_type' => 'c']));
+$agent->sendEvent(makeEvent(['event_type' => 'd']));
+$agent->flushBuffer();
+$t->same(2, count($fake->keysContaining(':agent_events:event_')), 'a failed send persists the requeued events at the flush point');
+$keysBefore = $fake->keysContaining(':agent_events:event_');
+sort($keysBefore);
+refl($agent, 'eventsRetryAfter')->setValue($agent, 0.0);
+$agent->buffer->persistPending();
+$keysAfter = $fake->keysContaining(':agent_events:event_');
+sort($keysAfter);
+$t->same($keysBefore, $keysAfter, 'requeued items keep their keys (no duplicate writes)');
+$agent->flushBuffer();
+$t->same([], $fake->storage, 'a later successful send deletes the requeued keys');
+
+// Buffered items are written at the persistence point (tick between flushes).
+$agent = makeAgent(['flushInterval' => 3600, 'bufferSize' => 100], new RecordingTransport());
+$fake = new FakeRedisClient();
+$agent->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$agent->sendEvent(makeEvent(['event_type' => 'e']));
+$agent->sendEvent(makeEvent(['event_type' => 'f']));
+$t->same([], $fake->storage, 'nothing written before the persistence point');
+$agent->buffer->lastFlushTime = microtime(true);
+$agent->flushIfNeeded();
+$t->same(2, count($fake->storage), 'flushIfNeeded persists all pending items even when no flush is due');
+$agent->flushIfNeeded();
+$t->same(2, count($fake->storage), 'persisting twice does not rewrite items');
+
+// A dropped (evicted) pending item is never written.
+$fake = new FakeRedisClient();
+$buffer = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$buffer->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$buffer->addEvent(makeEvent(['event_type' => 'old']));
+$buffer->addEvent(makeEvent(['event_type' => 'new']));
+$buffer->persistPending();
+$t->same(1, count($fake->storage), 'an evicted pending event is not persisted');
+
+// A persisted item dropped under pressure is confirmed (key deleted, no orphan).
+$fake = new FakeRedisClient();
+$buffer = new EventBuffer(makeConfig(['bufferSize' => 1]));
+$buffer->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$buffer->addEvent(makeEvent(['event_type' => 'old']));
+$buffer->addMetric(makeMetric(['value' => 1]));
+$buffer->persistPending();
+$t->same(2, count($fake->storage), 'precondition: event and metric persisted');
+$buffer->addEvent(makeEvent(['event_type' => 'new']));
+$buffer->addMetric(makeMetric(['value' => 2]));
+$t->same([], $fake->storage, 'dropping persisted items deletes their keys');
+
+// A failed batch counts failures and respects the cooldown.
+$fake = new FakeRedisClient();
+$fake->failWrites(true);
+$buffer = new EventBuffer(makeConfig());
+$handler = new RedisHandler($fake, $prefix, new SilentLogger());
+$buffer->initializeRedis($handler);
+for ($i = 0; $i < 5; $i++) {
+    $buffer->addEvent(makeEvent(['event_type' => 'x' . $i]));
+}
+$t->same(0, $buffer->getStats()['redisPersistFailures'], 'no failure is counted before the persistence point');
+$buffer->persistPending();
+$t->same(5, $buffer->getStats()['redisPersistFailures'], 'a failed batch counts one failure per item');
+$t->same(5, $handler->failureCount(), 'handler failure count matches (3 real failures plus 2 cooldown rejections)');
+$fake->failWrites(false);
+$buffer->addEvent(makeEvent(['event_type' => 'y']));
+$buffer->persistPending();
+$t->same([], $fake->storage, 'the cooldown still blocks writes after 3 consecutive failures');
+
+// The shutdown hook persists whatever is still pending (the process ended
+// before any flush or tick); bin/test_shutdown.php proves it end to end.
+$fake = new FakeRedisClient();
+$shutdownAgent = new GuardAgent(makeConfig(['installId' => 'install-shutdown']), new RecordingTransport());
+$shutdownAgent->initializeRedis(new RedisHandler($fake, $prefix, new SilentLogger()));
+$shutdownAgent->sendEvent(makeEvent());
+$t->same([], $fake->storage, 'adding does not touch redis');
+$shutdownAgent->persistAtShutdown();
+$t->same(1, count($fake->storage), 'persistAtShutdown writes the pending event');
+
+// The startup encryption error includes the cause, still failing closed.
+$caught = null;
+try {
+    (new HttpTransport(makeConfig([
+        'endpoint' => 'https://ingest.example.test',
+        'projectEncryptionKey' => 'not-a-valid-key',
+    ])))->initialize();
+} catch (EncryptionConfigException $error) {
+    $caught = $error;
+}
+$t->ok($caught !== null, 'invalid encryption key still fails startup');
+$t->ok($caught !== null && str_contains($caught->getMessage(), 'refusing plaintext fallback (cause: '), 'startup error message carries the cause');
+$t->ok($caught !== null && $caught->getPrevious() !== null && str_contains($caught->getMessage(), $caught->getPrevious()->getMessage()), 'cause text equals the chained exception message');
 
 $t->finish();

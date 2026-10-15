@@ -35,14 +35,16 @@ const UNREACHABLE_LINES = [
     // of which throw) each catch every client Throwable inside RedisHandler
     // and degrade to a return value, so no Throwable can reach the buffer's
     // own catch arms.
-    'src/EventBuffer/EventBuffer.php' => [196, 197, 271, 272, 289, 290, 377, 378, 425, 426, 595, 596],
-    // stop()'s close catch: GuardAgent::$redisHandler is the final
+    'src/EventBuffer/EventBuffer.php' => [198, 199, 307, 308, 325, 326, 641, 642],
+    // persistAtShutdown()'s catch: persistPending() is total, every Redis
+    // call inside it is caught by RedisHandler (176-177). stop()'s close
+    // catch: GuardAgent::$redisHandler is the final
     // RedisHandler (initializeRedis hard-types it) whose close() catches
-    // every Throwable (252-253). asMetadataArray/asStringArray fallbacks:
+    // every Throwable (276-277). asMetadataArray/asStringArray fallbacks:
     // the inputs are SecurityEvent::$metadata / SecurityMetric::$tags array
     // properties passed through HeadersRedactor::sanitize, which returns an
-    // array for an array input at the top depth (778, 789).
-    'src/GuardAgent.php' => [252, 253, 778, 789],
+    // array for an array input at the top depth (809, 820).
+    'src/GuardAgent.php' => [176, 177, 276, 277, 809, 820],
     // read()/write() catch arms over @-suppressed filesystem calls, which
     // return false instead of throwing (76-77, 79, 95-96): is_file($path)
     // true implies a non-empty path, and the PHP 8 ValueErrors in this
@@ -63,7 +65,7 @@ const UNREACHABLE_LINES = [
     // toWire() casts metadata/tags to objects (SecurityEvent.php:155,
     // SecurityMetric.php:101) and makeRequest's payload always comes from
     // buildBatchWire mapping those toWire() outputs (512-515, 522-525).
-    'src/Transport/HttpTransport.php' => [512, 513, 514, 515, 522, 523, 524, 525],
+    'src/Transport/HttpTransport.php' => [515, 516, 517, 518, 525, 526, 527, 528],
     // json_encode of a finite float with JSON_THROW_ON_ERROR cannot fail:
     // the is_finite guard above rejects Inf/NaN before this call is reached
     // (asserted by the canonical json tests) and a finite float scalar has
