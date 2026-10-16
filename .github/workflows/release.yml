@@ -1,84 +1,103 @@
 name: Release Gate
 
+# A pushed v* tag is the release for guard-agent-php (there is no publish step).
+# This workflow only confirms that the tagged commit is good. Nothing is
+# linted or tested here: the tagged commit must already have passed the push
+# workflows listed in REQUIRED_WORKFLOWS below (ci.yml). A release
+# can therefore never fail on a check its pull request did not run.
+#
+# Composer audit is not repeated here: it is a job of ci.yml, which runs it
+# on the same commit against the same composer.json, so a vulnerable
+# dependency set already fails ci.yml above. Packagist serves the tag as
+# soon as it is pushed, so no check has to wait for the tag to exist.
+#
+# Re-check: run this workflow by hand (Actions > Release Gate > Run workflow)
+# with the tag, for example v3.2.4. It checks out that tag, so a fixed
+# workflow on the default branch can re-check an existing tag.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to check, for example v3.2.4'
+        required: true
 
 permissions: {}
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  REQUIRED_WORKFLOWS: >-
+    .github/workflows/ci.yml
+
 jobs:
-  test:
-    name: Test at tag (php ${{ matrix.php }})
+  verify:
+    name: Tagged commit passed CI
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['8.2', '8.3', '8.4']
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+      actions: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - name: Checkout tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: ${{ matrix.php }}
-          extensions: mbstring
-          coverage: none
-
-      - name: Install dependencies
-        run: composer install --no-interaction --no-progress
-
-      - name: php -l sweep
-        run: for f in $(find src bin -name '*.php'); do php -l "$f" > /dev/null || exit 1; done && echo LINT_OK
-
-      - name: test_agent
+      - name: Resolve the tag
+        id: tag
         env:
-          REDIS_HOST: 127.0.0.1
-        run: php bin/test_agent.php
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$tag' is not of the form v1.2.3"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-  composer-audit:
-    name: Composer audit at tag
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout tag
+      - name: Checkout the tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
           persist-credentials: false
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: '8.3'
-          coverage: none
-
-      - name: Install dependencies
-        run: composer install --no-interaction --no-progress
-
-      - name: Composer audit
-        # This package has zero composer dependencies and `composer audit`
-        # exits 1 on an empty package graph, so audit only when the lock
-        # actually contains packages (the guard self-heals when the first
-        # dependency lands).
+      # The newest push run of each required workflow on the tagged commit
+      # must have succeeded. A tag pushed right after a merge waits for them
+      # (up to an hour) instead of failing.
+      - name: Require green CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          if [ "$(composer show --locked 2>/dev/null | wc -l)" -gt 0 ]; then
-            composer audit --locked
-          else
-            echo "Zero composer dependencies; nothing to audit."
-          fi
+          sha=$(git rev-parse HEAD)
+          for _ in $(seq 1 60); do
+            runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=push&per_page=100" \
+              --jq '[.workflow_runs | group_by(.path)[] | max_by(.run_number) | {path, status, conclusion}]')
+            waiting=0
+            for wf in $REQUIRED_WORKFLOWS; do
+              run=$(jq -c --arg p "$wf" '.[] | select(.path == $p)' <<< "$runs")
+              if [ -z "$run" ]; then
+                echo "$wf: no push run on $sha yet"; waiting=1; continue
+              fi
+              status=$(jq -r .status <<< "$run"); conclusion=$(jq -r .conclusion <<< "$run")
+              if [ "$status" != "completed" ]; then
+                echo "$wf: $status"; waiting=1
+              elif [ "$conclusion" != "success" ]; then
+                echo "::error::$wf concluded $conclusion on $sha; fix the default branch and release a new tag"
+                exit 1
+              else
+                echo "ok: $wf success on $sha"
+              fi
+            done
+            [ "$waiting" = "0" ] && exit 0
+            sleep 60
+          done
+          echo "::error::required workflows did not finish on $sha within an hour"
+          exit 1

@@ -138,7 +138,7 @@ Docker equivalents are in Quick Start. There is no Makefile (the sibling PHP rep
 4. Edit the async-of-nothing source directly: there is no unasync mirror here (unlike guard-core); the whole package is synchronous by design.
 5. Keep `declare(strict_types=1)` on every file and PHP 8.2 compatibility (no 8.3+ syntax; `readonly` classes and enums are fine).
 6. No em-dashes or en-dashes anywhere in this repository.
-7. Run the three PHP-version legs plus `composer validate --strict` before pushing; the release gate re-runs the same matrix at tags.
+7. Run the three PHP-version legs plus `composer validate --strict` before pushing; the release gate does not re-run anything at the tag, it only requires the push run of `ci.yml` on the tagged commit to have succeeded.
 8. Never merge into `main` and never create tags without an explicit instruction; the working branch pattern is `feat/...` with a draft PR.
 
 ## Related Projects
