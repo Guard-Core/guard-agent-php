@@ -3,6 +3,14 @@
     "description": "PHP telemetry agent for the guard-core ecosystem: buffers security events, metrics, and agent status locally and ships them to the Guard Core App ingestion API with at-least-once semantics",
     "type": "library",
     "license": "MIT",
+    "authors": [
+        {
+            "name": "Renzo Franceschini",
+            "email": "rennf93@guard-core.com",
+            "homepage": "https://github.com/rennf93",
+            "role": "Maintainer"
+        }
+    ],
     "require": {
         "php": "^8.2",
         "ext-json": "*",
