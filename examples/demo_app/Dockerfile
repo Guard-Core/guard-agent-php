@@ -7,7 +7,7 @@ WORKDIR /app
 COPY composer.json composer.lock ./
 RUN composer install --no-interaction --no-progress
 
-FROM php:8.3-cli
+FROM php:8.3.36-cli
 
 # The agent's transport speaks HTTPS to the ingestion API; the curl
 # extension needs its libcurl dev headers to compile.
