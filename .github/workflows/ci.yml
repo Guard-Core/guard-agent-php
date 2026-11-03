@@ -48,7 +48,7 @@ jobs:
         run: composer install --no-interaction --no-progress
 
       - name: php -l sweep
-        run: for f in $(find src bin -name '*.php'); do php -l "$f" > /dev/null || exit 1; done && echo LINT_OK
+        run: find src bin -name '*.php' -print0 | while IFS= read -r -d '' f; do php -l "$f" > /dev/null || exit 1; done && echo LINT_OK
 
       - name: test_agent
         env:
@@ -125,3 +125,20 @@ jobs:
         env:
           REDIS_HOST: 127.0.0.1
         run: php .github/coverage-runner.php bin/test_agent.php
+
+  ci:
+    # The context master-rule requires: it reports on every run and fails when a job above failed or was
+    # cancelled. A skipped job counts as passed.
+    if: always()
+    needs: [test, composer-audit, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job above succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "needs: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in failure|cancelled) exit 1 ;; esac
+          done
